@@ -109,6 +109,11 @@ cd frontend && rm -rf node_modules package-lock.json && npm install
 - Create test employees in Admin Dashboard
 - Test WFH requests and geofence validation
 
+## WFH (Work From Home) Behavior Notes
+- Admins can approve WFH requests for employees and optionally allocate a specific access window (start/end) UTC-normalized. If the WFH approval window is active the employee can download files without satisfying geofence/location/SSID constraints.
+- Employees can request WFH from the Employee dashboard; admins can approve via Admin APIs or Admin Dashboard.
+- The Access API no longer requires latitude/longitude as mandatory when WFH is active; it's optional in requests to support WFH bypass.
+
 ## Project Structure
 
 ```

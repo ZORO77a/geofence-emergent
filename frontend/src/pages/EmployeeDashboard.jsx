@@ -200,14 +200,33 @@ function EmployeeDashboard() {
   const handleFileAccess = async (file) => {
     const locToUse = location || lastKnownLocationRef.current;
     const wifiToUse = wifiSSID || lastKnownWifiRef.current;
-    if (!locToUse) {
-      toast.error('Location not detected. Please enable location access.');
-      return;
+
+    // Determine if WFH bypass is active for this employee
+    let wfhActive = false;
+    if (wfhStatus && wfhStatus.status === 'approved') {
+      try {
+        if (wfhStatus.access_start && wfhStatus.access_end) {
+          const start = new Date(wfhStatus.access_start);
+          const end = new Date(wfhStatus.access_end);
+          const now = new Date();
+          if (start <= now && now <= end) {
+            wfhActive = true;
+          }
+        }
+      } catch (e) {
+        // If parsing fails, treat as not active
+      }
     }
 
-    if (!wifiSSID) {
-      toast.error('Please enter WiFi SSID');
-      return;
+    if (!wfhActive) {
+      if (!locToUse) {
+        toast.error('Location not detected. Please enable location access.');
+        return;
+      }
+      if (!wifiToUse) {
+        toast.error('Please enter WiFi SSID');
+        return;
+      }
     }
 
     try {
@@ -217,14 +236,16 @@ function EmployeeDashboard() {
         longitude: locToUse.longitude,
         wifi_ssid: wifiToUse
       });
+      const payload = { file_id: file.file_id };
+      if (!wfhActive) {
+        payload.latitude = locToUse.latitude;
+        payload.longitude = locToUse.longitude;
+        payload.wifi_ssid = wifiToUse;
+      }
+
       const response = await axios.post(
         `${API}/files/access`,
-        {
-          file_id: file.file_id,
-          latitude: locToUse.latitude,
-          longitude: locToUse.longitude,
-          wifi_ssid: wifiToUse
-        },
+        payload,
         {
           headers: { Authorization: `Bearer ${token}` },
           responseType: 'blob'
@@ -326,6 +347,24 @@ function EmployeeDashboard() {
             ) : (
               'Querying with: No location or WiFi selected'
             )}
+          </div>
+          <div>
+            <button
+              className="secondary-btn"
+              onClick={() => {
+                localStorage.removeItem('lastKnownLocation');
+                localStorage.removeItem('lastKnownWifi');
+                lastKnownLocationRef.current = null;
+                lastKnownWifiRef.current = null;
+                setLocation(null);
+                setWifiSSID('');
+                toast.success('Cleared saved location and WiFi');
+                loadData();
+              }}
+              style={{ marginLeft: '12px' }}
+            >
+              Clear Saved
+            </button>
           </div>
         </div>
         <div className="stats-grid">

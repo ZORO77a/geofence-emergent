@@ -111,13 +111,19 @@ class GeofenceValidator:
         reasons = []
         
         # Validate location
-        location_valid, location_msg = GeofenceValidator.validate_location(
-            request.get('latitude', 0),
-            request.get('longitude', 0),
-            config.get('latitude', 0),
-            config.get('longitude', 0),
-            config.get('radius', 100)
-        )
+        lat = request.get('latitude', None)
+        lon = request.get('longitude', None)
+        if lat is None or lon is None:
+            location_valid = False
+            location_msg = "Location not provided"
+        else:
+            location_valid, location_msg = GeofenceValidator.validate_location(
+                lat,
+                lon,
+                config.get('latitude', 0),
+                config.get('longitude', 0),
+                config.get('radius', 100)
+            )
         validations['location'] = location_msg
         if not location_valid:
             reasons.append(location_msg)

@@ -80,8 +80,8 @@ class WFHRequestCreate(BaseModel):
     reason: str
 
 class AccessRequest(BaseModel):
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     wifi_ssid: Optional[str] = None
     file_id: str
 

@@ -7,7 +7,7 @@ import motor.motor_asyncio
 import os
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 import io
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -114,6 +114,28 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="User not found")
     
     return user
+
+
+def _parse_iso_to_utc(s: Optional[str]) -> Optional[datetime]:
+    """
+    Parse an ISO 8601 string to a timezone-aware UTC datetime.
+    Accepts values with 'Z' or explicit offsets or naive datetimes and returns UTC aware.
+    Returns None on parse failure or if s is None.
+    """
+    if not s:
+        return None
+    try:
+        # Replace Z with +00:00 so fromisoformat can parse it
+        normalized = s.replace('Z', '+00:00') if isinstance(s, str) else s
+        dt = datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+    # Make the datetime timezone-aware and converted to UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 # Auth Routes
 @api_router.post("/auth/login")
@@ -353,17 +375,22 @@ async def update_wfh_request(employee_username: str, action: dict, current_user:
     # If admin provided access window, validate and store as ISO strings
     if access_start:
         try:
-            start_dt = datetime.fromisoformat(access_start.replace('Z', '+00:00'))
+            # Parse to timezone-aware UTC and persist as ISO strings with tz info
+            start_dt = _parse_iso_to_utc(access_start)
+            if not start_dt:
+                raise ValueError("Invalid access_start format")
             update_doc["access_start"] = start_dt.isoformat()
         except (ValueError, AttributeError):
-            raise HTTPException(status_code=400, detail=f"Invalid access_start format: {access_start}. Use ISO 8601 format (e.g., 2025-12-07T09:00:00)")
+            raise HTTPException(status_code=400, detail=f"Invalid access_start format: {access_start}. Use ISO 8601 format (e.g., 2025-12-07T09:00:00 or 2025-12-07T09:00:00+00:00)")
     
     if access_end:
         try:
-            end_dt = datetime.fromisoformat(access_end.replace('Z', '+00:00'))
+            end_dt = _parse_iso_to_utc(access_end)
+            if not end_dt:
+                raise ValueError("Invalid access_end format")
             update_doc["access_end"] = end_dt.isoformat()
         except (ValueError, AttributeError):
-            raise HTTPException(status_code=400, detail=f"Invalid access_end format: {access_end}. Use ISO 8601 format (e.g., 2025-12-07T17:00:00)")
+            raise HTTPException(status_code=400, detail=f"Invalid access_end format: {access_end}. Use ISO 8601 format (e.g., 2025-12-07T17:00:00 or 2025-12-07T17:00:00+00:00)")
     
     # If both provided, validate that end > start
     if access_start and access_end:
@@ -485,25 +512,22 @@ async def list_files(latitude: Optional[float] = None, longitude: Optional[float
             continue
 
         # Check WFH override first
-        wfh_request = await db.wfh_requests.find_one({
-            "employee_username": current_user["username"],
-            "status": "approved"
-        })
+        # Prefer the latest approved WFH request (sorted by approved_at desc) to avoid using stale requests
+        wfh_request = await db.wfh_requests.find_one(
+            {"employee_username": current_user["username"], "status": "approved"},
+            sort=[("approved_at", -1)]
+        )
         now = datetime.now(timezone.utc)
         if wfh_request:
-            access_start = wfh_request.get("access_start")
-            access_end = wfh_request.get("access_end")
+            access_start = _parse_iso_to_utc(wfh_request.get("access_start"))
+            access_end = _parse_iso_to_utc(wfh_request.get("access_end"))
             if access_start and access_end:
-                try:
-                    start_dt = datetime.fromisoformat(access_start)
-                    end_dt = datetime.fromisoformat(access_end)
-                except Exception:
-                    # If invalid dates, don't allow bypass
-                    start_dt = None
-                    end_dt = None
-                if start_dt and end_dt and start_dt <= now <= end_dt:
+                # We expect access_start/access_end to already be timezone-aware UTC datetimes
+                if access_start <= now <= access_end:
                     file_obj["accessible"] = True
                     file_obj["access_reason"] = "WFH approved - within access window"
+                    # Include the WFH request id for audit/debugging
+                    file_obj["wfh_request_id"] = str(wfh_request.get("_id"))
                     result_files.append(file_obj)
                     continue
 
@@ -556,10 +580,10 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
         
         # Employee access - check conditions
         # Check if WFH approved and whether access window allows bypass
-        wfh_request = await db.wfh_requests.find_one({
-            "employee_username": current_user["username"],
-            "status": "approved"
-        })
+        wfh_request = await db.wfh_requests.find_one(
+            {"employee_username": current_user["username"], "status": "approved"},
+            sort=[("approved_at", -1)]
+        )
 
         # Get geofence config
         config = await db.geofence_config.find_one({}, {"_id": 0})
@@ -571,19 +595,17 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
 
         if wfh_request:
             # If admin approved, require an allocated access window
-            access_start = wfh_request.get("access_start")
-            access_end = wfh_request.get("access_end")
+            access_start = _parse_iso_to_utc(wfh_request.get("access_start"))
+            access_end = _parse_iso_to_utc(wfh_request.get("access_end"))
 
             if access_start and access_end:
-                try:
-                    start_dt = datetime.fromisoformat(access_start)
-                    end_dt = datetime.fromisoformat(access_end)
-                except Exception:
-                    validation_result = {"allowed": False, "reason": "Invalid access window format"}
-                else:
-                    if start_dt <= now <= end_dt:
+                if access_start and access_end:
+                    if access_start <= now <= access_end:
                         # WFH approved and within admin-allocated window: bypass wifi/location checks
                         validation_result = {"allowed": True, "reason": "WFH approved - time window active"}
+                        # Add WFH audit id
+                        wfh_id = str(wfh_request.get("_id"))
+                        log_extra = {"wfh_request_id": wfh_id}
                     else:
                         # WFH exists but not active. Fall back to normal geofence validation rather than blocking.
                         validation_result = geofence_validator.validate_access(
@@ -619,6 +641,10 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
             "success": validation_result["allowed"],
             "reason": validation_result["reason"]
         }
+
+        # Include WFH request id if bypass was used
+        if wfh_request and validation_result.get('allowed') and validation_result.get('reason','').startswith('WFH approved'):
+            log['wfh_request_id'] = str(wfh_request.get('_id'))
         
         file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
         if file_meta:
