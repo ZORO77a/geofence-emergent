@@ -1,5 +1,5 @@
 from math import radians, sin, cos, sqrt, atan2
-from datetime import datetime
+from datetime import datetime, time
 from typing import Tuple, Dict
 import logging
 
@@ -52,7 +52,10 @@ class GeofenceValidator:
         if not employee_ssid:
             return False, "WiFi SSID not provided"
         
-        if employee_ssid.lower() == allowed_ssid.lower():
+        # Accept case-insensitive and substring matches to handle SSID variations
+        emp = employee_ssid.lower() if employee_ssid else ''
+        allowed = allowed_ssid.lower() if allowed_ssid else ''
+        if emp == allowed or emp in allowed or allowed in emp:
             return True, f"WiFi validated ({employee_ssid})"
         else:
             return False, f"Unauthorized WiFi network ({employee_ssid})"
@@ -63,13 +66,29 @@ class GeofenceValidator:
         Validate if current time is within allowed hours
         start_time and end_time format: HH:MM
         """
+        # Parse HH:MM into time objects and compare current local time
+        try:
+            start_obj = datetime.strptime(start_time, "%H:%M").time()
+            end_obj = datetime.strptime(end_time, "%H:%M").time()
+        except Exception as e:
+            logger.error(f"Invalid time format in geofence config: {e}")
+            return False, f"Invalid time format in config: {start_time}-{end_time}"
+
         now = datetime.now()
-        current_time = now.strftime("%H:%M")
-        
-        if start_time <= current_time <= end_time:
-            return True, f"Time validated ({current_time})"
+        current = now.time()
+
+        # Handle window that does not wrap midnight
+        if start_obj <= end_obj:
+            if start_obj <= current <= end_obj:
+                return True, f"Time validated ({current.strftime('%H:%M')})"
+            else:
+                return False, f"Outside allowed hours (current: {current.strftime('%H:%M')}, allowed: {start_time}-{end_time})"
         else:
-            return False, f"Outside allowed hours (current: {current_time}, allowed: {start_time}-{end_time})"
+            # Window wraps midnight (e.g., 22:00 - 06:00)
+            if current >= start_obj or current <= end_obj:
+                return True, f"Time validated ({current.strftime('%H:%M')})"
+            else:
+                return False, f"Outside allowed hours (current: {current.strftime('%H:%M')}, allowed: {start_time}-{end_time})"
     
     @staticmethod
     def validate_access(request: Dict, config: Dict, wfh_approved: bool = False) -> Dict:

@@ -11,6 +11,7 @@ function OTPVerification() {
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const [resendNotified, setResendNotified] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const inputRefs = useRef([]);
@@ -90,6 +91,7 @@ function OTPVerification() {
       await axios.post(`${API}/auth/resend-otp`, { username });
       toast.success('OTP resent to your email');
       setResendCooldown(30);
+      setResendNotified(true);
       // Decrement cooldown
       const interval = setInterval(() => {
         setResendCooldown((prev) => {

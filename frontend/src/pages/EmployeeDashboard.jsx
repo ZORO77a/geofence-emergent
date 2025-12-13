@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
@@ -10,10 +10,29 @@ const API = `${BACKEND_URL}/api`;
 function EmployeeDashboard() {
   const [files, setFiles] = useState([]);
   const [wfhStatus, setWfhStatus] = useState(null);
+  const [serverTime, setServerTime] = useState(null);
   const [location, setLocation] = useState(null);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLon, setManualLon] = useState('');
   const [wifiSSID, setWifiSSID] = useState('');
+  const [locationNotified, setLocationNotified] = useState(false);
+  const [wifiNotified, setWifiNotified] = useState(false);
+  const [lastWfhStatus, setLastWfhStatus] = useState(null);
+  const [lastFilesAccessible, setLastFilesAccessible] = useState(false);
+  const lastWfhStatusRef = useRef(null);
+  const lastFilesAccessibleRef = useRef(false);
+
+  // Keep refs in sync if state changes from other places
+  useEffect(() => {
+    lastWfhStatusRef.current = lastWfhStatus;
+  }, [lastWfhStatus]);
+
+  useEffect(() => {
+    lastFilesAccessibleRef.current = lastFilesAccessible;
+  }, [lastFilesAccessible]);
   const [wfhReason, setWfhReason] = useState('');
   const [showWFHForm, setShowWFHForm] = useState(false);
+  const loadFailedRef = useRef(false);
   const navigate = useNavigate();
 
   const token = localStorage.getItem('token');
@@ -34,18 +53,31 @@ function EmployeeDashboard() {
     return () => clearInterval(interval);
   }, [token]);
 
+  // Keep the file list updated when geo/wifi changes but avoid re-running getUserLocation/getWiFiSSID
+  useEffect(() => {
+    if (!token) return;
+    loadData();
+  }, [location, wifiSSID]);
+
   const getUserLocation = () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          setLocation({
+          const newLocation = {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude
-          });
-          toast.success('Location detected');
+          };
+          setLocation(newLocation);
+          if (!locationNotified) {
+            toast.success('Location detected');
+            setLocationNotified(true);
+          }
         },
         (error) => {
-          toast.error('Please enable location access');
+          if (!locationNotified) {
+            toast.error('Please enable location access');
+            setLocationNotified(true);
+          }
         }
       );
     } else {
@@ -59,12 +91,18 @@ function EmployeeDashboard() {
       const response = await axios.get(`${API}/wifi-ssid`, { headers });
       if (response.data.ssid) {
         setWifiSSID(response.data.ssid);
-        toast.success(`WiFi detected: ${response.data.ssid}`);
+        if (!wifiNotified) {
+          toast.success(`WiFi detected: ${response.data.ssid}`);
+          setWifiNotified(true);
+        }
       } else {
-        toast.info('Could not detect WiFi. Please enter manually.');
+        if (!wifiNotified) {
+          toast.info('Could not detect WiFi. Please enter manually.');
+          setWifiNotified(true);
+        }
       }
     } catch (error) {
-      logger.error('Failed to detect WiFi SSID');
+      console.error('Failed to detect WiFi SSID', error);
       // Silently fail - user can enter manually
     }
   };
@@ -72,16 +110,57 @@ function EmployeeDashboard() {
   const loadData = async () => {
     try {
       const headers = { Authorization: `Bearer ${token}` };
-      
-      const [filesRes, wfhRes] = await Promise.all([
-        axios.get(`${API}/files`, { headers }),
-        axios.get(`${API}/wfh-request/status`, { headers })
+      const params = {};
+      if (location) {
+        params.latitude = location.latitude;
+        params.longitude = location.longitude;
+      }
+      if (wifiSSID) {
+        params.wifi_ssid = wifiSSID;
+      }
+
+      console.debug('Loading files with params:', params);
+      const [filesRes, wfhRes, timeRes] = await Promise.all([
+        axios.get(`${API}/files`, { headers, params }),
+        axios.get(`${API}/wfh-request/status`, { headers }),
+        axios.get(`${API}/time`, { headers })
       ]);
 
       setFiles(filesRes.data);
       setWfhStatus(wfhRes.data);
+      if (timeRes?.data?.server_time) {
+        setServerTime(timeRes.data.server_time);
+      }
+
+      // WFH status toast only when it changes
+      const statusStr = wfhRes.data?.status || 'none';
+      if (statusStr !== lastWfhStatusRef.current) {
+        setLastWfhStatus(statusStr);
+        lastWfhStatusRef.current = statusStr;
+        if (statusStr === 'approved') {
+          toast.success('Work From Home approved');
+        } else if (statusStr === 'pending') {
+          toast.info('Work From Home request pending');
+        } else if (statusStr === 'rejected') {
+          toast.error('Work From Home request rejected');
+        } else {
+          // none - do not show
+        }
+      }
+
+      // Files accessible state - notify only on transition from not accessible -> accessible
+      const anyAccessible = Array.isArray(filesRes.data) && filesRes.data.some(f => f.accessible);
+      if (anyAccessible && !lastFilesAccessibleRef.current) {
+        toast.success('Files are now accessible');
+      }
+      setLastFilesAccessible(anyAccessible);
+      lastFilesAccessibleRef.current = anyAccessible;
+      loadFailedRef.current = false;
     } catch (error) {
-      toast.error('Failed to load data');
+      if (!loadFailedRef.current) {
+        toast.error('Failed to load data');
+        loadFailedRef.current = true;
+      }
     }
   };
 
@@ -102,6 +181,12 @@ function EmployeeDashboard() {
     }
 
     try {
+      console.debug('Attempting file access POST payload:', {
+        file_id: file.file_id,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        wifi_ssid: wifiSSID
+      });
       const response = await axios.post(
         `${API}/files/access`,
         {
@@ -116,23 +201,41 @@ function EmployeeDashboard() {
         }
       );
 
-      // Create download link
-      const url = window.URL.createObjectURL(new Blob([response.data]));
+      // When a blob is returned, create download link
+      const blob = new Blob([response.data]);
+      const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
       link.setAttribute('download', file.filename);
       document.body.appendChild(link);
       link.click();
       link.remove();
+      window.URL.revokeObjectURL(url);
 
       toast.success('File downloaded successfully');
     } catch (error) {
-      const detail = error.response?.data?.detail;
+      // Parse JSON error if returned as blob when responseType='blob'
+      let detail = error.response?.data?.detail;
+      if (!detail && error.response && error.response.data instanceof Blob) {
+        try {
+          // Read blob text
+          const text = await error.response.data.text();
+          const parsed = JSON.parse(text);
+          detail = parsed?.detail || text;
+        } catch (err) {
+          // ignore parsing errors
+          detail = null;
+        }
+      }
+
       let errorMsg = 'Access denied';
       if (Array.isArray(detail)) {
         errorMsg = detail.map(d => d.msg || JSON.stringify(d)).join('; ');
       } else if (typeof detail === 'string') {
         errorMsg = detail;
+      } else if (detail && typeof detail === 'object') {
+        // If the server returned a structured validation result
+        errorMsg = detail.reason || JSON.stringify(detail);
       }
       toast.error(errorMsg);
     }
@@ -181,6 +284,20 @@ function EmployeeDashboard() {
       </div>
 
       <div className="dashboard-content">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+          <div style={{ color: '#6b7280', fontSize: '13px' }}>
+            {location || wifiSSID ? (
+              <>
+                Querying with:&nbsp;
+                {location ? `Lat: ${location.latitude.toFixed(5)}, Lon: ${location.longitude.toFixed(5)}` : ''}
+                {location && wifiSSID ? ' | ' : ''}
+                {wifiSSID ? `WiFi: ${wifiSSID}` : ''}
+              </>
+            ) : (
+              'Querying with: No location or WiFi selected'
+            )}
+          </div>
+        </div>
         <div className="stats-grid">
           <div className="stat-card">
             <MapPin size={32} style={{ color: '#667eea', marginBottom: '12px' }} />
@@ -194,7 +311,7 @@ function EmployeeDashboard() {
             <Clock size={32} style={{ color: '#10b981', marginBottom: '12px' }} />
             <div className="stat-label">Current Time</div>
             <div className="stat-value" style={{ fontSize: '18px' }}>
-              {new Date().toLocaleTimeString()}
+              {new Date().toLocaleTimeString()} {serverTime ? `(server: ${new Date(serverTime).toLocaleTimeString()})` : ''}
             </div>
           </div>
           
@@ -226,6 +343,14 @@ function EmployeeDashboard() {
                 Request Work From Home
               </button>
             )}
+            <button
+              className="secondary-btn"
+              style={{ marginLeft: '12px' }}
+              onClick={() => loadData()}
+              data-testid="refresh-data-btn"
+            >
+              Refresh Data
+            </button>
           </div>
 
           {showWFHForm && (
@@ -274,6 +399,21 @@ function EmployeeDashboard() {
                   Detect Location
                 </button>
               )}
+              <div style={{ marginTop: '12px' }}>
+                <label style={{ display: 'block', marginBottom: '6px' }}>Or enter location manually:</label>
+                <input type="text" className="form-input" placeholder="Latitude" value={manualLat} onChange={(e) => setManualLat(e.target.value)} style={{ width: '160px', display: 'inline-block', marginRight: '8px' }} />
+                <input type="text" className="form-input" placeholder="Longitude" value={manualLon} onChange={(e) => setManualLon(e.target.value)} style={{ width: '160px', display: 'inline-block' }} />
+                <button onClick={() => {
+                  if (manualLat && manualLon) {
+                    setLocation({ latitude: parseFloat(manualLat), longitude: parseFloat(manualLon) });
+                    toast.success('Manual location set');
+                  } else {
+                    toast.error('Please enter both latitude and longitude');
+                  }
+                }} className="primary-btn" style={{ marginLeft: '8px' }}>
+                  Set Location
+                </button>
+              </div>
             </div>
 
             <div className="form-group">
@@ -289,6 +429,14 @@ function EmployeeDashboard() {
                 onChange={(e) => setWifiSSID(e.target.value)}
                 data-testid="wifi-ssid-input"
               />
+              <button
+                className="primary-btn"
+                style={{ marginLeft: '8px', marginTop: '8px' }}
+                onClick={getWiFiSSID}
+                data-testid="detect-wifi-btn"
+              >
+                Detect WiFi
+              </button>
               <p style={{ fontSize: '12px', color: '#6b7280', marginTop: '6px' }}>
                 Note: Browser cannot auto-detect WiFi SSID. Please enter manually.
               </p>
@@ -365,9 +513,7 @@ function EmployeeDashboard() {
             const withinWindow = start && end ? (now >= start && now <= end) : false;
             const expired = end ? (now > end) : false;
 
-            // Only show files if WFH is approved and within window
-            const canAccessFiles = wfhApproved && withinWindow;
-
+            // We always show the list of files but indicate accessibility per file
             return (
               <>
                 {wfhApproved && withinWindow && (
@@ -378,68 +524,106 @@ function EmployeeDashboard() {
 
                 {wfhApproved && expired && (
                   <div style={{ padding: '12px', background: '#fee2e2', borderRadius: '8px', marginBottom: '20px', color: '#991b1b' }}>
-                    <strong>✗ Access Window Expired</strong> - Your WFH access period has ended. Files are not available.
+                    <strong>✗ Access Window Expired</strong> - Your WFH access period has ended. You will need to be in the allowed location/WiFi/time to access files.
                   </div>
                 )}
 
                 {wfhApproved && !expired && !withinWindow && (
                   <div style={{ padding: '12px', background: '#fef3c7', borderRadius: '8px', marginBottom: '20px', color: '#92400e' }}>
-                    <strong>⏳ Outside Access Window</strong> - You are outside your approved WFH time window. Files are not available.
+                    <strong>⏳ Outside Access Window</strong> - You are outside your approved WFH time window. Files remain accessible only within the window or when in allowed location/WiFi.
                   </div>
                 )}
 
                 {wfhStatus?.status === 'pending' && (
                   <div style={{ padding: '12px', background: '#fef3c7', borderRadius: '8px', marginBottom: '20px', color: '#92400e' }}>
-                    <strong>⏳ WFH Pending</strong> - Your WFH request is pending approval. Files are not available.
+                    <strong>⏳ WFH Pending</strong> - Your WFH request is pending approval. Files can still be seen but are inaccessible unless you meet location/WiFi/time constraints.
                   </div>
                 )}
 
                 {!wfhApproved && wfhStatus?.status !== 'pending' && (
                   <div style={{ padding: '12px', background: '#fee2e2', borderRadius: '8px', marginBottom: '20px', color: '#991b1b' }}>
-                    <strong>✗ No WFH Approval</strong> - You must have an approved WFH request to access files.
-                  </div>
-                )}
-
-                {canAccessFiles ? (
-                  <div className="file-grid">
-                    {files.length > 0 ? (
-                      files.map((file) => (
-                        <div 
-                          key={file.file_id} 
-                          className="file-card"
-                          onClick={() => handleFileAccess(file)}
-                          data-testid={`file-card-${file.file_id}`}
-                        >
-                          <div className="file-icon">
-                            <FileText size={48} style={{ color: '#667eea' }} />
-                          </div>
-                          <div className="file-name">{file.filename}</div>
-                          <div className="file-size">{(file.size / 1024).toFixed(2)} KB</div>
-                          <div style={{ marginTop: '12px' }}>
-                            <span className="badge badge-success">Encrypted</span>
-                          </div>
-                          <button 
-                            className="primary-btn" 
-                            style={{ width: '100%', marginTop: '12px' }}
-                            data-testid={`download-btn-${file.file_id}`}
-                          >
-                            <Download size={16} style={{ display: 'inline', marginRight: '6px' }} />
-                            Download
-                          </button>
-                        </div>
-                      ))
-                    ) : (
-                      <div style={{ gridColumn: '1/-1', textAlign: 'center', color: '#6b7280', padding: '20px' }}>
-                        No files available
+                    <strong>✗ No WFH Approval</strong> - Files are visible but accessible only when you meet the admin-specified location/WiFi/time constraints.
+                    {!location && !wifiSSID && (
+                      <div style={{ marginTop: '8px', color: '#6b7280' }}>
+                        Please detect your Location and/or enter your WiFi SSID, then click "Refresh Data" to re-check accessibility.
                       </div>
                     )}
                   </div>
-                ) : (
-                  <div style={{ textAlign: 'center', padding: '40px', color: '#6b7280' }}>
-                    <FileText size={48} style={{ color: '#d1d5db', marginBottom: '16px' }} />
-                    <p>Files are only accessible with an active approved WFH request within the approved time window.</p>
-                  </div>
                 )}
+
+                <div className="file-grid">
+                  {files.length > 0 ? (
+                    files.map((file) => (
+                      <div 
+                        key={file.file_id} 
+                        className="file-card"
+                        data-testid={`file-card-${file.file_id}`}
+                      >
+                        <div className="file-icon">
+                          <FileText size={48} style={{ color: '#667eea' }} />
+                        </div>
+                        <div className="file-name">{file.filename}</div>
+                        <div className="file-size">{(file.size / 1024).toFixed(2)} KB</div>
+                        <div style={{ marginTop: '12px' }}>
+                          <span className="badge badge-success">Encrypted</span>
+                          {!file.accessible && (
+                            <span className="badge badge-warning" style={{ marginLeft: '8px' }} title={file.access_reason || 'Locked'}>
+                              Locked
+                            </span>
+                          )}
+                        </div>
+                        {!file.accessible && file.access_reason && (
+                          <div style={{ marginTop: '8px', fontSize: '12px', color: '#6b7280' }}>{file.access_reason}</div>
+                        )}
+                        {file.validations && (
+                          <div style={{ marginTop: '8px', fontSize: '12px', color: '#6b7280' }}>
+                            <div><strong>Validation:</strong></div>
+                            <div style={{ fontSize: '11px' }}>Location: {file.validations.location}</div>
+                            <div style={{ fontSize: '11px' }}>WiFi: {file.validations.wifi}</div>
+                            <div style={{ fontSize: '11px' }}>Time: {file.validations.time}</div>
+                          </div>
+                        )}
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                          <button 
+                            className="primary-btn" 
+                            style={{ width: '100%' }}
+                            data-testid={`download-btn-${file.file_id}`}
+                            onClick={() => file.accessible ? handleFileAccess(file) : toast.error(file.access_reason || 'File is locked')}
+                            disabled={!file.accessible}
+                          >
+                            <Download size={16} style={{ display: 'inline', marginRight: '6px' }} />
+                            {file.accessible ? 'Download' : 'Locked'}
+                          </button>
+                          <button
+                            className="secondary-btn"
+                            style={{ width: '120px' }}
+                            onClick={async () => {
+                              try {
+                                const headers = { Authorization: `Bearer ${token}` };
+                                const params = {};
+                                if (location) { params.latitude = location.latitude; params.longitude = location.longitude; }
+                                if (wifiSSID) { params.wifi_ssid = wifiSSID; }
+                                const res = await axios.get(`${API}/validate-access`, { headers, params });
+                                if (res?.data) {
+                                  const d = res.data;
+                                  toast(`${d.reason}. validation: location=${d.validations.location}, wifi=${d.validations.wifi}, time=${d.validations.time}`);
+                                }
+                              } catch (e) {
+                                toast.error('Failed to validate access');
+                              }
+                            }}
+                          >
+                            Validate
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ gridColumn: '1/-1', textAlign: 'center', color: '#6b7280', padding: '20px' }}>
+                      No files available
+                    </div>
+                  )}
+                </div>
               </>
             );
           })()}

@@ -7,7 +7,7 @@ import motor.motor_asyncio
 import os
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import io
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -128,11 +128,11 @@ async def login(request: LoginRequest):
     
     # Generate OTP
     otp = generate_otp()
-    otp_expiry = datetime.utcnow() + timedelta(minutes=5)
+    otp_expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
     
     await db.users.update_one(
         {"username": request.username},
-        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.utcnow().isoformat()}}
+        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.now(timezone.utc).isoformat()}}
     )
     
     # Send OTP via email
@@ -156,7 +156,7 @@ async def resend_otp(request: ResendOTPRequest):
         raise HTTPException(status_code=404, detail="User not found")
 
     # Rate-limit: Don't allow resending OTPs more than once per 30 seconds
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     otp_sent_at = None
     if user.get("otp_sent_at"):
         try:
@@ -169,10 +169,10 @@ async def resend_otp(request: ResendOTPRequest):
 
     # Generate new OTP & send
     otp = generate_otp()
-    otp_expiry = datetime.utcnow() + timedelta(minutes=5)
+    otp_expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
     await db.users.update_one(
         {"username": request.username},
-        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.utcnow().isoformat()}}
+        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.now(timezone.utc).isoformat()}}
     )
 
     try:
@@ -195,7 +195,7 @@ async def verify_otp(request: OTPVerifyRequest):
     
     # Check OTP expiry
     otp_expiry = datetime.fromisoformat(user["otp_expiry"])
-    if datetime.utcnow() > otp_expiry:
+    if datetime.now(timezone.utc) > otp_expiry:
         raise HTTPException(status_code=401, detail="OTP expired")
     
     # Clear OTP
@@ -223,6 +223,28 @@ async def get_wifi_ssid():
     """
     ssid = WiFiService.get_connected_ssid()
     return {"ssid": ssid}
+
+
+@api_router.get("/validate-access")
+async def validate_access_route(latitude: Optional[float] = None, longitude: Optional[float] = None, wifi_ssid: Optional[str] = None):
+    """
+    Debug endpoint - validate a hypothetical access request using current geofence configuration.
+    Returns the validation_result returned by GeofenceValidator.
+    """
+    config = await db.geofence_config.find_one({}, {"_id": 0})
+    # Use minimal request object
+    req = {"latitude": latitude, "longitude": longitude, "wifi_ssid": wifi_ssid}
+    result = geofence_validator.validate_access(req, config, False)
+    return result
+
+
+@api_router.get("/time")
+async def get_server_time():
+    """
+    Return the server current time in ISO format and timezone info for debugging.
+    """
+    now = datetime.now(timezone.utc)
+    return {"server_time": now.isoformat(), "timezone": "UTC"}
 
 # Admin Routes
 @api_router.post("/admin/employees")
@@ -325,7 +347,7 @@ async def update_wfh_request(employee_username: str, action: dict, current_user:
     update_doc = {
         "status": status,
         "admin_comment": comment,
-        "approved_at": datetime.utcnow().isoformat()
+        "approved_at": datetime.now(timezone.utc).isoformat()
     }
 
     # If admin provided access window, validate and store as ISO strings
@@ -422,7 +444,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         "file_id": str(file_id),
         "filename": file.filename,
         "uploaded_by": current_user["username"],
-        "uploaded_at": datetime.utcnow().isoformat(),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "encrypted": True,
         "size": len(file_content),
         "encryption_key": crypto_service.key_to_string(encryption_key)
@@ -433,17 +455,84 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
     return {"message": "File uploaded and encrypted", "file_id": str(file_id)}
 
 @api_router.get("/files")
-async def list_files(current_user: dict = Depends(get_current_user)):
-    files = await db.file_metadata.find(
-        {},
-        {"_id": 0, "encryption_key": 0}  # Don't expose encryption key
-    ).to_list(1000)
-    
-    return files
+async def list_files(latitude: Optional[float] = None, longitude: Optional[float] = None, wifi_ssid: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    """
+    List files. Employees will only see files uploaded by admin.
+    Optional query params latitude/longitude/wifi_ssid will be used to compute per-file accessibility flag.
+    """
+    query = {}
+    # Employees should only see admin uploaded files
+    if current_user["role"] == UserRole.EMPLOYEE:
+        query = {"uploaded_by": "admin"}
+
+    files_cursor = await db.file_metadata.find(query, {"_id": 0, "encryption_key": 0}).to_list(1000)
+
+    # Evaluate accessibility for each file for this employee if coordinates/wifi are provided
+    config = await db.geofence_config.find_one({}, {"_id": 0})
+    result_files = []
+    logger.info(f"Listing files called by user={current_user['username']} with lat={latitude}, lon={longitude}, wifi={wifi_ssid}")
+    logger.info(f"Geofence config: {config}")
+    for f in files_cursor:
+        file_obj = f.copy()
+        file_obj["accessible"] = False
+        file_obj["access_reason"] = "Access conditions not met"
+
+        if current_user["role"] != UserRole.EMPLOYEE:
+            # Admins can access everything
+            file_obj["accessible"] = True
+            file_obj["access_reason"] = "Admin access"
+            result_files.append(file_obj)
+            continue
+
+        # Check WFH override first
+        wfh_request = await db.wfh_requests.find_one({
+            "employee_username": current_user["username"],
+            "status": "approved"
+        })
+        now = datetime.now(timezone.utc)
+        if wfh_request:
+            access_start = wfh_request.get("access_start")
+            access_end = wfh_request.get("access_end")
+            if access_start and access_end:
+                try:
+                    start_dt = datetime.fromisoformat(access_start)
+                    end_dt = datetime.fromisoformat(access_end)
+                except Exception:
+                    # If invalid dates, don't allow bypass
+                    start_dt = None
+                    end_dt = None
+                if start_dt and end_dt and start_dt <= now <= end_dt:
+                    file_obj["accessible"] = True
+                    file_obj["access_reason"] = "WFH approved - within access window"
+                    result_files.append(file_obj)
+                    continue
+
+        # If coords/wifi not provided, we cannot determine access - keep accessible False
+        if latitude is None or longitude is None or wifi_ssid is None:
+            file_obj["accessible"] = False
+            file_obj["access_reason"] = "Location/WiFi not provided"
+            result_files.append(file_obj)
+            continue
+
+        # Otherwise validate geofence
+        validation_result = geofence_validator.validate_access(
+            {"latitude": latitude, "longitude": longitude, "wifi_ssid": wifi_ssid},
+            config,
+            False
+        )
+        logger.info(f"Per-file validation for {file_obj['file_id']}: {validation_result}")
+        file_obj["accessible"] = validation_result.get("allowed", False)
+        file_obj["access_reason"] = validation_result.get("reason", "Access denied")
+        file_obj["validations"] = validation_result.get("validations")
+
+        result_files.append(file_obj)
+
+    return result_files
 
 @api_router.post("/files/access")
 async def access_file(request: AccessRequest, current_user: dict = Depends(get_current_user)):
     try:
+        logger.info(f"File access attempt: user={current_user['username']}, file_id={request.file_id}, lat={request.latitude}, lon={request.longitude}, wifi={request.wifi_ssid}")
         if current_user["role"] != UserRole.EMPLOYEE:
             # Admin has unrestricted access
             file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
@@ -451,7 +540,8 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
                 raise HTTPException(status_code=404, detail="File not found")
             
             # Get encrypted file
-            grid_out = await fs.open_download_stream(file_meta["file_id"])
+            from bson import ObjectId
+            grid_out = await fs.open_download_stream(ObjectId(file_meta["file_id"]))
             encrypted_content = await grid_out.read()
             
             # Decrypt
@@ -473,8 +563,9 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
 
         # Get geofence config
         config = await db.geofence_config.find_one({}, {"_id": 0})
+        logger.info(f"Geofence config: {config}")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         # Default validation result - not allowed until checks run
         validation_result = {"allowed": False, "reason": "Access denied"}
 
@@ -504,6 +595,7 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
                 config,
                 False
             )
+        logger.info(f"Validation result for file {request.file_id}: {validation_result}")
         
         # Log access attempt
         log = {
@@ -511,7 +603,7 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
             "file_id": request.file_id,
             "filename": "",
             "action": "access",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "location": {"lat": request.latitude, "lon": request.longitude},
             "wifi_ssid": request.wifi_ssid,
             "success": validation_result["allowed"],
@@ -525,13 +617,15 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
         await db.access_logs.insert_one(log)
         
         if not validation_result["allowed"]:
-            raise HTTPException(status_code=403, detail=validation_result["reason"])
+            # Return structured validation result for better frontend debugging
+            raise HTTPException(status_code=403, detail=validation_result)
         
         # Access granted - decrypt and return file
         if not file_meta:
             raise HTTPException(status_code=404, detail="File not found")
         
-        grid_out = await fs.open_download_stream(file_meta["file_id"])
+        from bson import ObjectId
+        grid_out = await fs.open_download_stream(ObjectId(file_meta["file_id"]))
         encrypted_content = await grid_out.read()
         
         key = crypto_service.string_to_key(file_meta["encryption_key"])
@@ -567,7 +661,7 @@ async def create_wfh_request(request: WFHRequestCreate, current_user: dict = Dep
     request_dict = {
         "employee_username": current_user["username"],
         "reason": request.reason,
-        "requested_at": datetime.utcnow().isoformat(),
+        "requested_at": datetime.now(timezone.utc).isoformat(),
         "status": "pending"
     }
     
