@@ -9,6 +9,8 @@ const API = `${BACKEND_URL}/api`;
 function OTPVerification() {
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const navigate = useNavigate();
   const location = useLocation();
   const inputRefs = useRef([]);
@@ -76,6 +78,39 @@ function OTPVerification() {
     }
   };
 
+  const handleResend = async () => {
+    if (!username) {
+      toast.error('Invalid session');
+      return;
+    }
+    if (resendCooldown && resendCooldown > 0) return;
+
+    setResending(true);
+    try {
+      await axios.post(`${API}/auth/resend-otp`, { username });
+      toast.success('OTP resent to your email');
+      setResendCooldown(30);
+      // Decrement cooldown
+      const interval = setInterval(() => {
+        setResendCooldown((prev) => {
+          if (prev <= 1) {
+            clearInterval(interval);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } catch (error) {
+      if (error.response?.status === 429) {
+        toast.error(error.response?.data?.detail || 'Too many requests. Please wait.');
+      } else {
+        toast.error(error.response?.data?.detail || 'Failed to resend OTP');
+      }
+    } finally {
+      setResending(false);
+    }
+  };
+
   return (
     <div className="login-container" data-testid="otp-verification-page">
       <div className="login-card">
@@ -114,6 +149,16 @@ function OTPVerification() {
 
         <div className="login-footer">
           <p style={{ color: '#6b7280', fontSize: '14px' }}>OTP expires in 5 minutes</p>
+          <div style={{ marginTop: '8px' }}>
+            <button
+              className="resend-btn"
+              onClick={handleResend}
+              disabled={resendCooldown > 0 || resending}
+              data-testid="resend-otp-btn"
+            >
+              {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : resending ? 'Resending...' : 'Resend OTP'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -16,6 +16,7 @@ class User(BaseModel):
     is_active: bool = True
     otp: Optional[str] = None
     otp_expiry: Optional[datetime] = None
+    otp_sent_at: Optional[datetime] = None
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -30,6 +31,10 @@ class LoginRequest(BaseModel):
 class OTPVerifyRequest(BaseModel):
     username: str
     otp: str
+
+
+class ResendOTPRequest(BaseModel):
+    username: str
 
 class FileMetadata(BaseModel):
     file_id: str

@@ -13,7 +13,7 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 
 from models import (
-    UserRole, User, UserCreate, LoginRequest, OTPVerifyRequest,
+    UserRole, User, UserCreate, LoginRequest, OTPVerifyRequest, ResendOTPRequest,
     FileMetadata, AccessLog, WFHRequest, AccessRequest, GeofenceConfig,
     EmployeeActivity, WFHRequestCreate
 )
@@ -132,7 +132,7 @@ async def login(request: LoginRequest):
     
     await db.users.update_one(
         {"username": request.username},
-        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat()}}
+        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.utcnow().isoformat()}}
     )
     
     # Send OTP via email
@@ -147,6 +147,41 @@ async def login(request: LoginRequest):
         "username": user["username"],
         "role": user["role"]
     }
+
+
+@api_router.post("/auth/resend-otp")
+async def resend_otp(request: ResendOTPRequest):
+    user = await db.users.find_one({"username": request.username}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Rate-limit: Don't allow resending OTPs more than once per 30 seconds
+    now = datetime.utcnow()
+    otp_sent_at = None
+    if user.get("otp_sent_at"):
+        try:
+            otp_sent_at = datetime.fromisoformat(user["otp_sent_at"])
+        except Exception:
+            otp_sent_at = None
+
+    if otp_sent_at and (now - otp_sent_at).total_seconds() < 30:
+        raise HTTPException(status_code=429, detail="Please wait before requesting a new OTP")
+
+    # Generate new OTP & send
+    otp = generate_otp()
+    otp_expiry = datetime.utcnow() + timedelta(minutes=5)
+    await db.users.update_one(
+        {"username": request.username},
+        {"$set": {"otp": otp, "otp_expiry": otp_expiry.isoformat(), "otp_sent_at": datetime.utcnow().isoformat()}}
+    )
+
+    try:
+        await send_otp_email(user["email"], otp, user["username"])
+    except Exception as e:
+        logger.error(f"Failed to resend OTP: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to resend OTP. Please check email configuration.")
+
+    return {"message": "OTP resent to your email"}
 
 @api_router.post("/auth/verify-otp")
 async def verify_otp(request: OTPVerifyRequest):
@@ -408,17 +443,97 @@ async def list_files(current_user: dict = Depends(get_current_user)):
 
 @api_router.post("/files/access")
 async def access_file(request: AccessRequest, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != UserRole.EMPLOYEE:
-        # Admin has unrestricted access
+    try:
+        if current_user["role"] != UserRole.EMPLOYEE:
+            # Admin has unrestricted access
+            file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
+            if not file_meta:
+                raise HTTPException(status_code=404, detail="File not found")
+            
+            # Get encrypted file
+            grid_out = await fs.open_download_stream(file_meta["file_id"])
+            encrypted_content = await grid_out.read()
+            
+            # Decrypt
+            key = crypto_service.string_to_key(file_meta["encryption_key"])
+            decrypted_content = crypto_service.decrypt_file(encrypted_content, key)
+            
+            return StreamingResponse(
+                io.BytesIO(decrypted_content),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={file_meta['filename']}"}
+            )
+        
+        # Employee access - check conditions
+        # Check if WFH approved and whether access window allows bypass
+        wfh_request = await db.wfh_requests.find_one({
+            "employee_username": current_user["username"],
+            "status": "approved"
+        })
+
+        # Get geofence config
+        config = await db.geofence_config.find_one({}, {"_id": 0})
+
+        now = datetime.utcnow()
+        # Default validation result - not allowed until checks run
+        validation_result = {"allowed": False, "reason": "Access denied"}
+
+        if wfh_request:
+            # If admin approved, require an allocated access window
+            access_start = wfh_request.get("access_start")
+            access_end = wfh_request.get("access_end")
+
+            if access_start and access_end:
+                try:
+                    start_dt = datetime.fromisoformat(access_start)
+                    end_dt = datetime.fromisoformat(access_end)
+                except Exception:
+                    validation_result = {"allowed": False, "reason": "Invalid access window format"}
+                else:
+                    if start_dt <= now <= end_dt:
+                        # WFH approved and within admin-allocated window: bypass wifi/location checks
+                        validation_result = {"allowed": True, "reason": "WFH approved - time window active"}
+                    else:
+                        validation_result = {"allowed": False, "reason": "Outside approved WFH access window"}
+            else:
+                validation_result = {"allowed": False, "reason": "WFH approved but access window not allocated by admin"}
+        else:
+            # No WFH approval - validate normally (must satisfy wifi, location, and time bounds)
+            validation_result = geofence_validator.validate_access(
+                request.model_dump(),
+                config,
+                False
+            )
+        
+        # Log access attempt
+        log = {
+            "employee_username": current_user["username"],
+            "file_id": request.file_id,
+            "filename": "",
+            "action": "access",
+            "timestamp": datetime.utcnow().isoformat(),
+            "location": {"lat": request.latitude, "lon": request.longitude},
+            "wifi_ssid": request.wifi_ssid,
+            "success": validation_result["allowed"],
+            "reason": validation_result["reason"]
+        }
+        
         file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
+        if file_meta:
+            log["filename"] = file_meta["filename"]
+        
+        await db.access_logs.insert_one(log)
+        
+        if not validation_result["allowed"]:
+            raise HTTPException(status_code=403, detail=validation_result["reason"])
+        
+        # Access granted - decrypt and return file
         if not file_meta:
             raise HTTPException(status_code=404, detail="File not found")
         
-        # Get encrypted file
         grid_out = await fs.open_download_stream(file_meta["file_id"])
         encrypted_content = await grid_out.read()
         
-        # Decrypt
         key = crypto_service.string_to_key(file_meta["encryption_key"])
         decrypted_content = crypto_service.decrypt_file(encrypted_content, key)
         
@@ -427,85 +542,12 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
             media_type="application/octet-stream",
             headers={"Content-Disposition": f"attachment; filename={file_meta['filename']}"}
         )
-    
-    # Employee access - check conditions
-    # Check if WFH approved and whether access window allows bypass
-    wfh_request = await db.wfh_requests.find_one({
-        "employee_username": current_user["username"],
-        "status": "approved"
-    })
-
-    # Get geofence config
-    config = await db.geofence_config.find_one({}, {"_id": 0})
-
-    now = datetime.utcnow()
-    # Default validation result - not allowed until checks run
-    validation_result = {"allowed": False, "reason": "Access denied"}
-
-    if wfh_request:
-        # If admin approved, require an allocated access window
-        access_start = wfh_request.get("access_start")
-        access_end = wfh_request.get("access_end")
-
-        if access_start and access_end:
-            try:
-                start_dt = datetime.fromisoformat(access_start)
-                end_dt = datetime.fromisoformat(access_end)
-            except Exception:
-                validation_result = {"allowed": False, "reason": "Invalid access window format"}
-            else:
-                if start_dt <= now <= end_dt:
-                    # WFH approved and within admin-allocated window: bypass wifi/location checks
-                    validation_result = {"allowed": True, "reason": "WFH approved - time window active"}
-                else:
-                    validation_result = {"allowed": False, "reason": "Outside approved WFH access window"}
-        else:
-            validation_result = {"allowed": False, "reason": "WFH approved but access window not allocated by admin"}
-    else:
-        # No WFH approval - validate normally (must satisfy wifi, location, and time bounds)
-        validation_result = geofence_validator.validate_access(
-            request.model_dump(),
-            config,
-            False
-        )
-    
-    # Log access attempt
-    log = {
-        "employee_username": current_user["username"],
-        "file_id": request.file_id,
-        "filename": "",
-        "action": "access",
-        "timestamp": datetime.utcnow().isoformat(),
-        "location": {"lat": request.latitude, "lon": request.longitude},
-        "wifi_ssid": request.wifi_ssid,
-        "success": validation_result["allowed"],
-        "reason": validation_result["reason"]
-    }
-    
-    file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
-    if file_meta:
-        log["filename"] = file_meta["filename"]
-    
-    await db.access_logs.insert_one(log)
-    
-    if not validation_result["allowed"]:
-        raise HTTPException(status_code=403, detail=validation_result["reason"])
-    
-    # Access granted - decrypt and return file
-    if not file_meta:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    grid_out = await fs.open_download_stream(file_meta["file_id"])
-    encrypted_content = await grid_out.read()
-    
-    key = crypto_service.string_to_key(file_meta["encryption_key"])
-    decrypted_content = crypto_service.decrypt_file(encrypted_content, key)
-    
-    return StreamingResponse(
-        io.BytesIO(decrypted_content),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={file_meta['filename']}"}
-    )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is (with CORS headers)
+        raise
+    except Exception as e:
+        logging.error(f"Error in file access endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # WFH Request Routes
 @api_router.post("/wfh-request")
@@ -550,17 +592,18 @@ async def get_wfh_status(current_user: dict = Depends(get_current_user)):
     
     return request
 
-# Add CORS middleware BEFORE including router - middleware order matters
+# Include router FIRST
+app.include_router(api_router)
+
+# Add CORS middleware AFTER router - FastAPI middleware stack is processed in reverse order
+# So last added = first applied
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=["*"],  # Allow all origins for local development
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Include router after middleware setup
-app.include_router(api_router)
 
 logging.basicConfig(
     level=logging.INFO,
