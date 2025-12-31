@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { FileText, Users, Activity, AlertTriangle, Settings, LogOut, Upload } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -16,6 +17,7 @@ function AdminDashboard() {
   const [geofenceConfig, setGeofenceConfig] = useState(null);
   const [newEmployee, setNewEmployee] = useState({ username: '', email: '', password: '' });
   const [selectedFile, setSelectedFile] = useState(null);
+  const [logFilter, setLogFilter] = useState(null);
   const navigate = useNavigate();
 
   const token = localStorage.getItem('token');
@@ -83,6 +85,40 @@ function AdminDashboard() {
       toast.error('Failed to delete employee');
     }
   };
+
+  // Edit employee state and handlers
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState({ username: '', email: '', password: '' });
+  const [editingOriginalUsername, setEditingOriginalUsername] = useState(null);
+
+  const openEdit = (emp) => {
+    setEditingOriginalUsername(emp.username);
+    setEditingEmployee({ username: emp.username, email: emp.email, password: '' });
+    setIsEditOpen(true);
+  };
+
+  const handleSaveEdit = async (e) => {
+    e.preventDefault();
+    if (!editingOriginalUsername) return;
+
+    try {
+      // Build updates payload - omit empty password
+      const updates = { username: editingEmployee.username, email: editingEmployee.email };
+      if (editingEmployee.password && editingEmployee.password.trim() !== '') {
+        updates.password = editingEmployee.password;
+      }
+
+      await axios.put(`${API}/admin/employees/${editingOriginalUsername}`, updates, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      toast.success('Employee updated');
+      setIsEditOpen(false);
+      loadData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to update employee');
+    }
+  }; 
 
   const handleWFHAction = async (empUsername, action) => {
     try {
@@ -188,7 +224,7 @@ function AdminDashboard() {
                 <div className="stat-value">{employees.length}</div>
               </div>
               
-              <div className="stat-card" onClick={() => setActiveTab('logs')} style={{ cursor: 'pointer' }}>
+              <div className="stat-card" onClick={() => { setLogFilter(null); setActiveTab('logs'); }} style={{ cursor: 'pointer' }}>
                 <Activity size={32} style={{ color: '#10b981', marginBottom: '12px' }} />
                 <div className="stat-label">Access Logs</div>
                 <div className="stat-value">{accessLogs.length}</div>
@@ -200,7 +236,7 @@ function AdminDashboard() {
                 <div className="stat-value">{wfhRequests.filter(r => r.status === 'pending').length}</div>
               </div>
               
-              <div className="stat-card">
+              <div className="stat-card" onClick={() => { setLogFilter('suspicious'); setActiveTab('logs'); }} style={{ cursor: 'pointer' }}>
                 <AlertTriangle size={32} style={{ color: '#ef4444', marginBottom: '12px' }} />
                 <div className="stat-label">Suspicious Activity</div>
                 <div className="stat-value">{suspiciousLogs.length}</div>
@@ -330,13 +366,21 @@ function AdminDashboard() {
                       <td>{new Date(emp.created_at).toLocaleDateString()}</td>
                       <td>
                         <button 
+                          className="action-btn"
+                          onClick={() => { setEditingOriginalUsername(emp.username); setEditingEmployee({ username: emp.username, email: emp.email, password: '' }); setIsEditOpen(true); }}
+                          data-testid={`modify-employee-${emp.username}`}
+                        >
+                          Modify
+                        </button>
+                        <button 
                           className="action-btn action-btn-danger"
                           onClick={() => handleDeleteEmployee(emp.username)}
                           data-testid={`delete-employee-${emp.username}`}
+                          style={{ marginLeft: '8px' }}
                         >
                           Delete
                         </button>
-                      </td>
+                      </td> 
                     </tr>
                   ))}
                 </tbody>
@@ -406,7 +450,15 @@ function AdminDashboard() {
           <div className="dashboard-section">
             <div className="section-header">
               <h2 className="section-title">Access Logs</h2>
-              <button className="primary-btn" onClick={() => setActiveTab('overview')}>Back to Overview</button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                {logFilter === 'suspicious' && (
+                  <span className="badge badge-warning">Suspicious only</span>
+                )}
+                {logFilter === 'suspicious' && (
+                  <button className="secondary-btn" onClick={() => setLogFilter(null)}>Clear filter</button>
+                )}
+                <button className="primary-btn" onClick={() => { setLogFilter(null); setActiveTab('overview'); }}>Back to Overview</button>
+              </div>
             </div>
             <div className="table-container">
               <table>
@@ -423,7 +475,7 @@ function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {accessLogs.map((log, idx) => (
+                  {(logFilter === 'suspicious' ? suspiciousLogs : accessLogs).map((log, idx) => (
                     <tr key={idx}>
                       <td>{log.employee_username}</td>
                       <td>{log.filename || 'N/A'}</td>
@@ -592,6 +644,46 @@ function AdminDashboard() {
             </form>
           </div>
         )}
+            {/* Edit Employee Dialog */}
+            <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Modify Employee</DialogTitle>
+                </DialogHeader>
+                <form onSubmit={handleSaveEdit} style={{ display: 'grid', gap: '12px', marginTop: '12px' }}>
+                  <input
+                    type="text"
+                    placeholder="Username"
+                    className="form-input"
+                    value={editingEmployee.username}
+                    onChange={(e) => setEditingEmployee({ ...editingEmployee, username: e.target.value })}
+                    required
+                    data-testid="edit-employee-username"
+                  />
+                  <input
+                    type="email"
+                    placeholder="Email"
+                    className="form-input"
+                    value={editingEmployee.email}
+                    onChange={(e) => setEditingEmployee({ ...editingEmployee, email: e.target.value })}
+                    required
+                    data-testid="edit-employee-email"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Password (leave blank to keep current)"
+                    className="form-input"
+                    value={editingEmployee.password}
+                    onChange={(e) => setEditingEmployee({ ...editingEmployee, password: e.target.value })}
+                    data-testid="edit-employee-password"
+                  />
+                  <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                    <button type="button" className="secondary-btn" onClick={() => setIsEditOpen(false)}>Cancel</button>
+                    <button type="submit" className="primary-btn" data-testid="save-employee-btn">Save Changes</button>
+                  </div>
+                </form>
+              </DialogContent>
+            </Dialog>
       </div>
     </div>
   );

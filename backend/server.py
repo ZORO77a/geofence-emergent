@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import io
+import time
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
@@ -453,20 +454,31 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
     if current_user["role"] != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required")
     
+    # Measure end-to-end timings: read, encrypt, store
+    start_total = time.perf_counter()
+
     # Read file content
+    start = time.perf_counter()
     file_content = await file.read()
+    read_time = time.perf_counter() - start
     
     # Encrypt file
+    start = time.perf_counter()
     encryption_key = crypto_service.generate_key()
     encrypted_content = crypto_service.encrypt_file(file_content, encryption_key)
+    encrypt_time = time.perf_counter() - start
     
     # Store in GridFS
+    start = time.perf_counter()
     file_id = await fs.upload_from_stream(
         file.filename,
         encrypted_content
     )
+    store_time = time.perf_counter() - start
     
-    # Store metadata
+    total_time = time.perf_counter() - start_total
+    
+    # Store metadata (include timings for observability)
     metadata = {
         "file_id": str(file_id),
         "filename": file.filename,
@@ -474,12 +486,20 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "encrypted": True,
         "size": len(file_content),
-        "encryption_key": crypto_service.key_to_string(encryption_key)
+        "encryption_key": crypto_service.key_to_string(encryption_key),
+        "timings_ms": {
+            "read_ms": round(read_time * 1000, 3),
+            "encrypt_ms": round(encrypt_time * 1000, 3),
+            "store_ms": round(store_time * 1000, 3),
+            "total_ms": round(total_time * 1000, 3)
+        }
     }
     
     await db.file_metadata.insert_one(metadata)
+
+    logger.info(f"File upload timings for {metadata['file_id']}: {metadata['timings_ms']}")
     
-    return {"message": "File uploaded and encrypted", "file_id": str(file_id)}
+    return {"message": "File uploaded and encrypted", "file_id": str(file_id), "timings_ms": metadata["timings_ms"]}
 
 @api_router.get("/files")
 async def list_files(latitude: Optional[float] = None, longitude: Optional[float] = None, wifi_ssid: Optional[str] = None, current_user: dict = Depends(get_current_user)):
