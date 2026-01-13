@@ -9,7 +9,10 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
 function AdminDashboard() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState(() => {
+    const saved = localStorage.getItem('adminActiveTab');
+    return saved || 'overview';
+  });
   const [employees, setEmployees] = useState([]);
   const [accessLogs, setAccessLogs] = useState([]);
   const [wfhRequests, setWfhRequests] = useState([]);
@@ -22,6 +25,11 @@ function AdminDashboard() {
 
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('username');
+
+  // Persist active tab to localStorage
+  useEffect(() => {
+    localStorage.setItem('adminActiveTab', activeTab);
+  }, [activeTab]);
 
   useEffect(() => {
     if (!token) {
