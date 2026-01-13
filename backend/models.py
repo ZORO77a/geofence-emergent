@@ -36,6 +36,29 @@ class OTPVerifyRequest(BaseModel):
 class ResendOTPRequest(BaseModel):
     username: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class CSRFTokenResponse(BaseModel):
+    csrf_token: str
+    token_type: str = "csrf"
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+class TokenRefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = 1800  # 30 minutes
+
 class FileMetadata(BaseModel):
     file_id: str
     filename: str
