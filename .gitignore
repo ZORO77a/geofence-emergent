@@ -42,8 +42,9 @@ frontend/.env
 *token.json*
 *credentials.json*
 
-# Documentation files (private - not shared on GitHub)
+# Documentation and report files (private - not shared on GitHub)
 *.md
+*.txt
 !node_modules/**/*.md
 
 # Logs and debug files
