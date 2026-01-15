@@ -12,6 +12,7 @@ function OTPVerification() {
   const [resending, setResending] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [resendNotified, setResendNotified] = useState(false);
+  const [otpTimer, setOtpTimer] = useState(300); // 5 minutes = 300 seconds
   const navigate = useNavigate();
   const location = useLocation();
   const inputRefs = useRef([]);
@@ -24,6 +25,26 @@ function OTPVerification() {
       navigate('/admin/login');
     }
   }, [username, role, navigate]);
+
+  // OTP Timer
+  useEffect(() => {
+    if (otpTimer <= 0) {
+      toast.error('OTP has expired. Please request a new one.');
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setOtpTimer((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [otpTimer]);
 
   const handleChange = (index, value) => {
     if (value.length > 1) value = value[0];
@@ -50,6 +71,11 @@ function OTPVerification() {
 
     if (otpCode.length !== 6) {
       toast.error('Please enter complete OTP');
+      return;
+    }
+
+    if (otpTimer <= 0) {
+      toast.error('OTP has expired. Please request a new one.');
       return;
     }
 
@@ -142,7 +168,7 @@ function OTPVerification() {
           <button 
             type="submit" 
             className="submit-btn" 
-            disabled={loading}
+            disabled={loading || otpTimer <= 0}
             data-testid="verify-otp-btn"
           >
             {loading ? 'Verifying...' : 'Verify OTP'}
@@ -150,7 +176,14 @@ function OTPVerification() {
         </form>
 
         <div className="login-footer">
-          <p style={{ color: '#6b7280', fontSize: '14px' }}>OTP expires in 5 minutes</p>
+          <p style={{ 
+            color: otpTimer <= 60 ? '#dc2626' : '#6b7280', 
+            fontSize: '14px',
+            fontWeight: otpTimer <= 60 ? 'bold' : 'normal'
+          }}>
+            OTP expires in {Math.floor(otpTimer / 60)}:{(otpTimer % 60).toString().padStart(2, '0')}
+            {otpTimer <= 60 && ' ⚠️'}
+          </p>
           <div style={{ marginTop: '8px' }}>
             <button
               className="resend-btn"

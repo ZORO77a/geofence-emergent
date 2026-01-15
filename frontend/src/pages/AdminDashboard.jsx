@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
@@ -22,14 +22,40 @@ function AdminDashboard() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [logFilter, setLogFilter] = useState(null);
   const navigate = useNavigate();
+  const activeTabRef = useRef('overview');
 
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('username');
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
-  // Persist active tab to localStorage
+  // Persist active tab to localStorage and update ref
   useEffect(() => {
     localStorage.setItem('adminActiveTab', activeTab);
+    activeTabRef.current = activeTab;
   }, [activeTab]);
+
+  // Handle browser back button
+  useEffect(() => {
+    // Push a new state to prevent going back to OTP/login page
+    window.history.pushState(null, null, window.location.pathname);
+
+    const handlePopState = () => {
+      // Check if on overview tab
+      if (activeTabRef.current === 'overview') {
+        // Show logout confirmation
+        setShowLogoutConfirm(true);
+        // Push state again to prevent going back
+        window.history.pushState(null, null, window.location.pathname);
+      } else {
+        // Go back to overview tab instead of previous page
+        setActiveTab('overview');
+        window.history.pushState(null, null, window.location.pathname);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     if (!token) {
@@ -61,7 +87,11 @@ function AdminDashboard() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogoutClick = () => {
+    setShowLogoutConfirm(true);
+  };
+
+  const confirmLogout = () => {
     localStorage.clear();
     navigate('/admin/login');
   };
@@ -177,10 +207,7 @@ function AdminDashboard() {
 
     try {
       await axios.post(`${API}/files/upload`, formData, {
-        headers: { 
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data'
-        }
+        headers: { Authorization: `Bearer ${token}` }
       });
       toast.success('File uploaded and encrypted');
       setSelectedFile(null);
@@ -215,7 +242,7 @@ function AdminDashboard() {
         </div>
         <div className="user-info">
           <span className="user-name">👤 {username}</span>
-          <button className="logout-btn" onClick={handleLogout} data-testid="logout-btn">
+          <button className="logout-btn" onClick={handleLogoutClick} data-testid="logout-btn">
             <LogOut size={16} style={{ display: 'inline', marginRight: '6px' }} />
             Logout
           </button>
@@ -692,6 +719,30 @@ function AdminDashboard() {
                 </form>
               </DialogContent>
             </Dialog>
+
+      {/* Logout Confirmation Dialog */}
+      <Dialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Confirm Logout</DialogTitle>
+          </DialogHeader>
+          <p>Are you sure you want to logout?</p>
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '20px' }}>
+            <button 
+              className="secondary-btn" 
+              onClick={() => setShowLogoutConfirm(false)}
+            >
+              No
+            </button>
+            <button 
+              className="primary-btn" 
+              onClick={confirmLogout}
+            >
+              Yes, Logout
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
       </div>
     </div>
   );

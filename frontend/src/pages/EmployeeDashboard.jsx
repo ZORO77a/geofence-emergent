@@ -33,11 +33,28 @@ function EmployeeDashboard() {
   }, [lastFilesAccessible]);
   const [wfhReason, setWfhReason] = useState('');
   const [showWFHForm, setShowWFHForm] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const loadFailedRef = useRef(false);
   const navigate = useNavigate();
 
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('username');
+
+  // Handle browser back button
+  useEffect(() => {
+    // Push a new state to prevent going back to OTP/login page
+    window.history.pushState(null, null, window.location.pathname);
+
+    const handlePopState = () => {
+      // Show logout confirmation
+      setShowLogoutConfirm(true);
+      // Push state again to prevent going back
+      window.history.pushState(null, null, window.location.pathname);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     if (!token) {
@@ -192,7 +209,11 @@ function EmployeeDashboard() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogoutClick = () => {
+    setShowLogoutConfirm(true);
+  };
+
+  const confirmLogout = () => {
     localStorage.clear();
     navigate('/employee/login');
   };
@@ -327,7 +348,7 @@ function EmployeeDashboard() {
         </div>
         <div className="user-info">
           <span className="user-name">👤 {username}</span>
-          <button className="logout-btn" onClick={handleLogout} data-testid="logout-btn">
+          <button className="logout-btn" onClick={handleLogoutClick} data-testid="logout-btn">
             <LogOut size={16} style={{ display: 'inline', marginRight: '6px' }} />
             Logout
           </button>
@@ -672,13 +693,14 @@ function EmployeeDashboard() {
                             style={{ width: '120px' }}
                             onClick={async () => {
                               try {
-                                const headers = { Authorization: `Bearer ${token}` };
+                                const token = getAccessToken();
+                                const headers = token ? { Authorization: `Bearer ${token}` } : {};
                                 const params = {};
                                 const locToUse = location || lastKnownLocationRef.current;
                                 const wifiToUse = wifiSSID || lastKnownWifiRef.current;
                                 if (locToUse) { params.latitude = locToUse.latitude; params.longitude = locToUse.longitude; }
                                 if (wifiToUse) { params.wifi_ssid = wifiToUse; }
-                                const res = await axios.get(`${API}/validate-access`, { headers, params });
+                                const res = await axios.get(`${API}/validate-access`, { headers, params, withCredentials: true });
                                 if (res?.data) {
                                   const d = res.data;
                                   toast(`${d.reason}. validation: location=${d.validations.location}, wifi=${d.validations.wifi}, time=${d.validations.time}`);
@@ -703,6 +725,62 @@ function EmployeeDashboard() {
             );
           })()}
         </div>
+
+        {/* Logout Confirmation Dialog */}
+        {showLogoutConfirm && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000
+          }}>
+            <div style={{
+              backgroundColor: 'white',
+              borderRadius: '8px',
+              padding: '24px',
+              boxShadow: '0 10px 25px rgba(0, 0, 0, 0.1)',
+              minWidth: '300px'
+            }}>
+              <h2 style={{ marginBottom: '12px', fontSize: '18px', fontWeight: 'bold' }}>Confirm Logout</h2>
+              <p style={{ marginBottom: '20px', color: '#6b7280' }}>Are you sure you want to logout?</p>
+              <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                <button 
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: '4px',
+                    border: '1px solid #d1d5db',
+                    backgroundColor: '#f3f4f6',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                  onClick={() => setShowLogoutConfirm(false)}
+                >
+                  No
+                </button>
+                <button 
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: '4px',
+                    border: 'none',
+                    backgroundColor: '#ef4444',
+                    color: 'white',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                  onClick={confirmLogout}
+                >
+                  Yes, Logout
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

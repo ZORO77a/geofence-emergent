@@ -1,6 +1,25 @@
 // craco.config.js
 const path = require("path");
-require("dotenv").config();
+// Suppress all console output from dotenv
+const originalLog = console.log;
+const originalWarn = console.warn;
+const originalInfo = console.info;
+let inDotenv = false;
+
+// Temporarily silence dotenv output
+console.log = (...args) => {
+  const msg = args.join(' ');
+  if (!msg.includes('[dotenv]') && !msg.includes('dotenvx') && !msg.includes('tip:') && !msg.includes('override')) {
+    originalLog(...args);
+  }
+};
+
+require("dotenv").config({ debug: false });
+
+// Restore original console
+console.log = originalLog;
+console.warn = originalWarn;
+console.info = originalInfo;
 
 // Environment variable overrides
 const config = {
