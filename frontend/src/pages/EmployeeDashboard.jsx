@@ -980,11 +980,11 @@ function EmployeeDashboard() {
               <div style={{
                 flex: 1,
                 overflow: 'auto',
-                padding: '20px',
+                padding: '10px',
                 backgroundColor: '#f9fafb',
                 display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
+                alignItems: 'stretch',
+                justifyContent: 'stretch'
               }}>
                 {viewerBlob && (() => {
                   const fileName = viewerFile.filename.toLowerCase();
@@ -1053,11 +1053,11 @@ function EmployeeDashboard() {
                     return (
                       <div style={{
                         backgroundColor: 'white',
-                        padding: '20px',
+                        padding: '15px',
                         borderRadius: '8px',
                         fontFamily: 'monospace',
-                        fontSize: '13px',
-                        lineHeight: '1.6',
+                        fontSize: '11px',
+                        lineHeight: '1.4',
                         color: '#1f2937',
                         border: '1px solid #e5e7eb',
                         whiteSpace: 'pre-wrap',
@@ -1066,7 +1066,9 @@ function EmployeeDashboard() {
                         WebkitUserSelect: 'none',
                         WebkitTouchCallout: 'none',
                         width: '100%',
-                        position: 'relative'
+                        height: '100%',
+                        position: 'relative',
+                        overflow: 'auto'
                       }}
                       onContextMenu={(e) => {
                         e.preventDefault();
