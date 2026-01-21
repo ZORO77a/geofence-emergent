@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
-import { FileText, Users, Activity, AlertTriangle, Settings, LogOut, Upload } from 'lucide-react';
+import { FileText, Users, Activity, AlertTriangle, Settings, LogOut, Upload, Brain, TrendingUp, Shield } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -18,6 +18,8 @@ function AdminDashboard() {
   const [wfhRequests, setWfhRequests] = useState([]);
   const [files, setFiles] = useState([]);
   const [geofenceConfig, setGeofenceConfig] = useState(null);
+  const [suspiciousAnalysis, setSuspiciousAnalysis] = useState(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [newEmployee, setNewEmployee] = useState({ username: '', email: '', password: '' });
   const [selectedFile, setSelectedFile] = useState(null);
   const [logFilter, setLogFilter] = useState(null);
@@ -105,6 +107,20 @@ function AdminDashboard() {
       setGeofenceConfig(configRes.data);
     } catch (error) {
       toast.error('Failed to load data');
+    }
+  };
+
+  const loadAISuspiciousAnalysis = async () => {
+    try {
+      setAnalysisLoading(true);
+      const headers = { Authorization: `Bearer ${token}` };
+      const response = await axios.get(`${API}/admin/suspicious-activities`, { headers });
+      setSuspiciousAnalysis(response.data);
+      toast.success('AI analysis completed');
+    } catch (error) {
+      toast.error('Failed to load AI analysis');
+    } finally {
+      setAnalysisLoading(false);
     }
   };
 
@@ -356,6 +372,14 @@ function AdminDashboard() {
                 <div className="stat-label">Suspicious Activity</div>
                 <div className="stat-value">{suspiciousLogs.length}</div>
               </div>
+
+              <div className="stat-card" onClick={() => setActiveTab('ai-analysis')} style={{ cursor: 'pointer' }}>
+                <Brain size={32} style={{ color: '#8b5cf6', marginBottom: '12px' }} />
+                <div className="stat-label">AI Security Analysis</div>
+                <div className="stat-value" style={{ fontSize: '14px' }}>
+                  {suspiciousAnalysis ? `${suspiciousAnalysis.suspicious_count} flagged` : 'Run Analysis'}
+                </div>
+              </div>
             </div>
 
             <div className="dashboard-section">
@@ -374,6 +398,10 @@ function AdminDashboard() {
                 <button className="primary-btn" onClick={() => setActiveTab('settings')} data-testid="settings-btn">
                   <Settings size={16} style={{ display: 'inline', marginRight: '6px' }} />
                   Settings
+                </button>
+                <button className="primary-btn" onClick={() => { setActiveTab('ai-analysis'); loadAISuspiciousAnalysis(); }} style={{ backgroundColor: '#8b5cf6' }}>
+                  <Brain size={16} style={{ display: 'inline', marginRight: '6px' }} />
+                  Run AI Security Analysis
                 </button>
               </div>
             </div>
@@ -811,6 +839,206 @@ function AdminDashboard() {
             </form>
           </div>
         )}
+
+        {activeTab === 'ai-analysis' && (
+          <div className="dashboard-section">
+            <div className="section-header">
+              <h2 className="section-title">🤖 AI Security Analysis</h2>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button 
+                  className="primary-btn" 
+                  onClick={loadAISuspiciousAnalysis}
+                  disabled={analysisLoading}
+                  style={{ backgroundColor: '#8b5cf6' }}
+                >
+                  {analysisLoading ? '⏳ Analyzing...' : '🔄 Run Analysis'}
+                </button>
+                <button className="primary-btn" onClick={() => setActiveTab('overview')}>Back to Overview</button>
+              </div>
+            </div>
+
+            {!suspiciousAnalysis ? (
+              <div style={{ 
+                textAlign: 'center', 
+                padding: '40px 20px',
+                backgroundColor: '#f9fafb',
+                borderRadius: '8px',
+                marginBottom: '20px'
+              }}>
+                <Brain size={48} style={{ color: '#8b5cf6', marginBottom: '16px' }} />
+                <p style={{ fontSize: '16px', color: '#6b7280', marginBottom: '20px' }}>
+                  Click "Run Analysis" to perform AI-powered security analysis on your access logs
+                </p>
+                <p style={{ fontSize: '14px', color: '#9ca3af' }}>
+                  This will analyze {accessLogs.length} access logs using machine learning algorithms
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Risk Summary */}
+                <div style={{ 
+                  display: 'grid', 
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                  gap: '16px',
+                  marginBottom: '24px'
+                }}>
+                  <div style={{
+                    padding: '16px',
+                    backgroundColor: suspiciousAnalysis.risk_level === 'high' ? '#fee2e2' : 
+                                      suspiciousAnalysis.risk_level === 'medium' ? '#fef3c7' : '#dcfce7',
+                    border: `2px solid ${suspiciousAnalysis.risk_level === 'high' ? '#fca5a5' : 
+                                        suspiciousAnalysis.risk_level === 'medium' ? '#fcd34d' : '#86efac'}`,
+                    borderRadius: '8px'
+                  }}>
+                    <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>Risk Level</div>
+                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: suspiciousAnalysis.risk_level === 'high' ? '#dc2626' : 
+                                                                                  suspiciousAnalysis.risk_level === 'medium' ? '#d97706' : '#16a34a' }}>
+                      {suspiciousAnalysis.risk_level.toUpperCase()}
+                    </div>
+                  </div>
+                  <div style={{
+                    padding: '16px',
+                    backgroundColor: '#f3f4f6',
+                    border: '2px solid #d1d5db',
+                    borderRadius: '8px'
+                  }}>
+                    <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>Total Activities</div>
+                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#1f2937' }}>
+                      {suspiciousAnalysis.total_activities}
+                    </div>
+                  </div>
+                  <div style={{
+                    padding: '16px',
+                    backgroundColor: '#fef2f2',
+                    border: '2px solid #fecaca',
+                    borderRadius: '8px'
+                  }}>
+                    <div style={{ fontSize: '12px', color: '#6b7280', marginBottom: '4px' }}>Suspicious Count</div>
+                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>
+                      {suspiciousAnalysis.suspicious_count}
+                    </div>
+                  </div>
+                </div>
+
+                {/* High Risk Employees */}
+                {Object.keys(suspiciousAnalysis.high_risk_employees || {}).length > 0 && (
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: 'bold' }}>⚠️ High Risk Employees</h3>
+                    <div style={{ 
+                      display: 'grid', 
+                      gap: '12px',
+                      backgroundColor: '#f9fafb',
+                      padding: '16px',
+                      borderRadius: '8px'
+                    }}>
+                      {Object.entries(suspiciousAnalysis.high_risk_employees).map(([username, data]) => (
+                        <div key={username} style={{
+                          padding: '12px',
+                          backgroundColor: 'white',
+                          border: '1px solid #e5e7eb',
+                          borderRadius: '6px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <div>
+                            <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{username}</div>
+                            <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                              Suspicious: {data.suspicious_count} | Failed: {data.failed_count} | Total: {data.total_activities}
+                            </div>
+                          </div>
+                          <div style={{
+                            padding: '6px 12px',
+                            backgroundColor: data.risk_score > 0.3 ? '#fee2e2' : '#fef3c7',
+                            color: data.risk_score > 0.3 ? '#dc2626' : '#d97706',
+                            borderRadius: '4px',
+                            fontSize: '12px',
+                            fontWeight: 'bold'
+                          }}>
+                            {(data.risk_score * 100).toFixed(1)}%
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Rule-Based Anomalies */}
+                {suspiciousAnalysis.rule_based_anomalies && suspiciousAnalysis.rule_based_anomalies.length > 0 && (
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: 'bold' }}>🚨 Detected Anomalies</h3>
+                    <div style={{ 
+                      display: 'grid', 
+                      gap: '12px',
+                      backgroundColor: '#f9fafb',
+                      padding: '16px',
+                      borderRadius: '8px'
+                    }}>
+                      {suspiciousAnalysis.rule_based_anomalies.slice(0, 15).map((anomaly, idx) => (
+                        <div key={idx} style={{
+                          padding: '12px',
+                          backgroundColor: anomaly.severity === 'high' ? '#fee2e2' : anomaly.severity === 'medium' ? '#fef3c7' : '#f0fdf4',
+                          border: `1px solid ${anomaly.severity === 'high' ? '#fecaca' : anomaly.severity === 'medium' ? '#fcd34d' : '#bbf7d0'}`,
+                          borderRadius: '6px'
+                        }}>
+                          <div style={{ 
+                            display: 'flex', 
+                            justifyContent: 'space-between', 
+                            alignItems: 'start',
+                            marginBottom: '6px'
+                          }}>
+                            <div style={{ fontWeight: 'bold' }}>
+                              {anomaly.type.replace(/_/g, ' ').toUpperCase()}
+                            </div>
+                            <span style={{
+                              padding: '2px 8px',
+                              backgroundColor: anomaly.severity === 'high' ? '#fca5a5' : anomaly.severity === 'medium' ? '#fcd34d' : '#86efac',
+                              color: anomaly.severity === 'high' ? '#7f1d1d' : anomaly.severity === 'medium' ? '#78350f' : '#166534',
+                              borderRadius: '3px',
+                              fontSize: '11px',
+                              fontWeight: 'bold'
+                            }}>
+                              {anomaly.severity}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '13px', color: '#374151' }}>
+                            {anomaly.description}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#6b7280', marginTop: '6px' }}>
+                            User: {anomaly.activity.employee_username} | Time: {new Date(anomaly.activity.timestamp).toLocaleString()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recommendations */}
+                {suspiciousAnalysis.recommendations && suspiciousAnalysis.recommendations.length > 0 && (
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ marginBottom: '12px', fontSize: '16px', fontWeight: 'bold' }}>💡 Recommendations</h3>
+                    <div style={{ 
+                      display: 'grid', 
+                      gap: '8px',
+                      backgroundColor: '#eff6ff',
+                      padding: '16px',
+                      borderRadius: '8px',
+                      borderLeft: '4px solid #3b82f6'
+                    }}>
+                      {suspiciousAnalysis.recommendations.map((rec, idx) => (
+                        <div key={idx} style={{ display: 'flex', gap: '8px' }}>
+                          <span style={{ color: '#3b82f6', fontWeight: 'bold' }}>✓</span>
+                          <span>{rec}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
             {/* Edit Employee Dialog */}
             <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
               <DialogContent>

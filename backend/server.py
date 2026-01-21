@@ -768,6 +768,47 @@ async def get_access_logs(current_user: dict = Depends(get_current_user)):
     logs = await db.access_logs.find({}, {"_id": 0}).sort("timestamp", -1).to_list(1000)
     return logs
 
+@api_router.get("/admin/suspicious-activities")
+async def analyze_suspicious_activities(current_user: dict = Depends(get_current_user)):
+    """
+    AI-powered analysis of suspicious activities using ML detection
+    Combines statistical anomaly detection with rule-based pattern matching
+    """
+    if current_user["role"] != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        # Get all access logs (last 2000 for performance)
+        logs = await db.access_logs.find({}, {"_id": 0}).sort("timestamp", -1).to_list(2000)
+        
+        if not logs:
+            return {
+                "total_activities": 0,
+                "suspicious_count": 0,
+                "risk_level": "low",
+                "findings": [],
+                "rule_based_anomalies": [],
+                "high_risk_employees": {},
+                "patterns": [],
+                "recommendations": ["No activities to analyze yet"],
+                "analysis_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        
+        # Train model with historical data if enough samples
+        if len(logs) >= 50:
+            anomaly_detector.train(logs)
+        
+        # Run comprehensive analysis
+        analysis_result = anomaly_detector.analyze_suspicious_activities(logs)
+        
+        logger.info(f"Suspicious activity analysis completed: {analysis_result['suspicious_count']} anomalies detected")
+        
+        return analysis_result
+    
+    except Exception as e:
+        logger.error(f"Error in suspicious activity analysis: {e}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
 @api_router.get("/admin/wfh-requests")
 async def get_wfh_requests(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
