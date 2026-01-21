@@ -387,7 +387,7 @@ function AdminDashboard() {
                   <thead>
                     <tr>
                       <th>Employee</th>
-                      <th>File</th>
+                      <th>Type</th>
                       <th>Action</th>
                       <th>Status</th>
                       <th>Time</th>
@@ -397,8 +397,19 @@ function AdminDashboard() {
                     {accessLogs.slice(0, 10).map((log, idx) => (
                       <tr key={idx}>
                         <td>{log.employee_username}</td>
-                        <td>{log.filename || 'N/A'}</td>
-                        <td>{log.action}</td>
+                        <td>
+                          <span className={`badge ${log.log_type === 'authentication' ? 'badge-info' : 'badge-primary'}`}>
+                            {log.log_type === 'authentication' ? 'Auth' : 'File'}
+                          </span>
+                        </td>
+                        <td>
+                          <span style={{
+                            fontWeight: '500',
+                            color: log.action.includes('failed') || log.action === 'denied' ? '#ef4444' : '#10b981'
+                          }}>
+                            {log.action}
+                          </span>
+                        </td>
                         <td>
                           <span className={`badge ${log.success ? 'badge-success' : 'badge-danger'}`}>
                             {log.success ? 'Success' : 'Denied'}
@@ -574,14 +585,28 @@ function AdminDashboard() {
         {activeTab === 'logs' && (
           <div className="dashboard-section">
             <div className="section-header">
-              <h2 className="section-title">Access Logs</h2>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                {logFilter === 'suspicious' && (
-                  <span className="badge badge-warning">Suspicious only</span>
+              <h2 className="section-title">Access & Authentication Logs</h2>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                {logFilter && (
+                  <span className="badge badge-warning">Filter: {logFilter}</span>
                 )}
-                {logFilter === 'suspicious' && (
+                {logFilter && (
                   <button className="secondary-btn" onClick={() => setLogFilter(null)}>Clear filter</button>
                 )}
+                <button 
+                  className={`secondary-btn ${logFilter === 'denied' ? 'primary-btn' : ''}`}
+                  onClick={() => setLogFilter(logFilter === 'denied' ? null : 'denied')}
+                  title="Show denied access and failed authentication attempts"
+                >
+                  Denied Only
+                </button>
+                <button 
+                  className={`secondary-btn ${logFilter === 'suspicious' ? 'primary-btn' : ''}`}
+                  onClick={() => setLogFilter(logFilter === 'suspicious' ? null : 'suspicious')}
+                  title="Show failed access attempts"
+                >
+                  Suspicious Only
+                </button>
                 <button className="primary-btn" onClick={() => { setLogFilter(null); setActiveTab('overview'); }}>Back to Overview</button>
               </div>
             </div>
@@ -590,8 +615,9 @@ function AdminDashboard() {
                 <thead>
                   <tr>
                     <th>Employee</th>
-                    <th>File</th>
+                    <th>Type</th>
                     <th>Action</th>
+                    <th>File</th>
                     <th>Location</th>
                     <th>WiFi</th>
                     <th>Status</th>
@@ -600,11 +626,27 @@ function AdminDashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(logFilter === 'suspicious' ? suspiciousLogs : accessLogs).map((log, idx) => (
+                  {accessLogs.filter(log => {
+                    if (logFilter === 'suspicious') return !log.success;
+                    if (logFilter === 'denied') return !log.success;
+                    return true;
+                  }).map((log, idx) => (
                     <tr key={idx}>
                       <td>{log.employee_username}</td>
+                      <td>
+                        <span className={`badge ${log.log_type === 'authentication' ? 'badge-info' : 'badge-primary'}`}>
+                          {log.log_type === 'authentication' ? 'Auth' : 'File'}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{
+                          fontWeight: '500',
+                          color: log.action.includes('failed') || log.action === 'denied' ? '#ef4444' : '#10b981'
+                        }}>
+                          {log.action}
+                        </span>
+                      </td>
                       <td>{log.filename || 'N/A'}</td>
-                      <td>{log.action}</td>
                       <td>
                         {(() => {
                           const loc = log.location;

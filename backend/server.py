@@ -260,6 +260,15 @@ async def login(request: LoginRequest, background_tasks: BackgroundTasks):
     # Rate limiting check
     if not check_rate_limit(request.username):
         logger.warning(f"Rate limit exceeded for user: {request.username}")
+        # Log failed login due to rate limit
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "login_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "Rate limit exceeded",
+            "log_type": "authentication"
+        })
         raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
     
     # Input validation
@@ -269,10 +278,29 @@ async def login(request: LoginRequest, background_tasks: BackgroundTasks):
     user = await db.users.find_one({"username": request.username}, {"_id": 0})
     
     if not user or not verify_password(request.password, user["password_hash"]):
+        # Log failed login attempt
+        logger.warning(f"Failed login attempt for user: {request.username}")
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "login_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "Invalid credentials",
+            "log_type": "authentication"
+        })
         # Generic error message to prevent user enumeration
         raise HTTPException(status_code=401, detail="Authentication failed")
     
     if not user.get("is_active", True):
+        # Log failed login for disabled account
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "login_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "Account is disabled",
+            "log_type": "authentication"
+        })
         raise HTTPException(status_code=403, detail="Account is disabled")
     
     # Generate OTP
@@ -336,16 +364,43 @@ async def verify_otp_endpoint(request: OTPVerifyRequest, response: Response):
         raise HTTPException(status_code=401, detail="Authentication failed")  # Generic error to prevent user enumeration
     
     if not user.get("otp"):
+        # Log failed OTP verification - no OTP generated
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "otp_verify_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "No OTP generated",
+            "log_type": "authentication"
+        })
         raise HTTPException(status_code=401, detail="No OTP generated. Please login again.")
     
     # Hash the provided OTP and compare with stored hashed OTP
     hashed_provided_otp = hash_otp(request.otp)
     if hashed_provided_otp != user["otp"]:
+        # Log failed OTP verification - invalid OTP
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "otp_verify_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "Invalid OTP",
+            "log_type": "authentication"
+        })
         raise HTTPException(status_code=401, detail="Invalid OTP")
     
     # Check OTP expiry
     otp_expiry = datetime.fromisoformat(user["otp_expiry"])
     if datetime.now(timezone.utc) > otp_expiry:
+        # Log failed OTP verification - expired OTP
+        await db.access_logs.insert_one({
+            "employee_username": request.username,
+            "action": "otp_verify_failed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": False,
+            "reason": "OTP expired",
+            "log_type": "authentication"
+        })
         raise HTTPException(status_code=401, detail="OTP expired")
     
     # Clear OTP
@@ -380,6 +435,16 @@ async def verify_otp_endpoint(request: OTPVerifyRequest, response: Response):
     )
     
     # Also return tokens for immediate use (backward compatibility)
+    # Log successful login
+    await db.access_logs.insert_one({
+        "employee_username": request.username,
+        "action": "login",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "success": True,
+        "reason": "Successful OTP verification",
+        "log_type": "authentication"
+    })
+    
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -699,6 +764,7 @@ async def get_access_logs(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required")
     
+    # Get both file access logs and authentication logs, sorted by timestamp (newest first)
     logs = await db.access_logs.find({}, {"_id": 0}).sort("timestamp", -1).to_list(1000)
     return logs
 

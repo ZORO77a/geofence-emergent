@@ -78,14 +78,15 @@ class GeofenceConfig(BaseModel):
 
 class AccessLog(BaseModel):
     employee_username: str
-    file_id: str
-    filename: str
-    action: str  # access, download, denied
+    file_id: Optional[str] = None
+    filename: Optional[str] = None
+    action: str  # access, download, denied, login, login_failed, otp_verify_failed
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     location: Optional[dict] = None
     wifi_ssid: Optional[str] = None
     success: bool
     reason: Optional[str] = None
+    log_type: str = "file_access"  # file_access, authentication
 
 class WFHRequest(BaseModel):
     employee_username: str
