@@ -42,10 +42,32 @@ frontend/.env
 *token.json*
 *credentials.json*
 
-# Documentation and report files (private - not shared on GitHub)
-*.md
-*.txt
-!node_modules/**/*.md
+# ⚠️ SECURITY: Post-Quantum Cryptography Keys (PRIVATE - Owner Access Only)
+# These files contain sensitive cryptographic keys and MUST NEVER be committed to public repositories
+keys/
+keys/**
+keys/*.bin
+keys/*.pem
+keys/*.key
+keys/*.txt
+backend/pqc_key_management.py
+backend/pqc_*.py
+
+# Additional sensitive files
+*.key
+*.pem
+*secret*
+*private*
+private_keys/
+
+# Documentation and report files (SELECTIVE - keep important docs!)
+# Only exclude specific sensitive documents, NOT all .md and .txt files
+# Keep: README.md, *.md for documentation
+# Exclude: Report files, analysis files marked as private
+backend_test_results.json
+CURRENT_VULNERABILITY_ASSESSMENT.md
+REMAINING_VULNERABILITIES.md
+VULNERABILITY_STATUS.txt
 
 # Logs and debug files
 npm-debug.log*
