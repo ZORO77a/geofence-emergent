@@ -225,6 +225,14 @@ function AdminDashboard() {
   const [editingEmployee, setEditingEmployee] = useState({ username: '', email: '', password: '' });
   const [editingOriginalUsername, setEditingOriginalUsername] = useState(null);
 
+  // WFH approval modal state
+  const [wfhModalOpen, setWfhModalOpen] = useState(false);
+  const [wfhModalEmployee, setWfhModalEmployee] = useState(null);
+  const [wfhStartDate, setWfhStartDate] = useState('');
+  const [wfhStartTime, setWfhStartTime] = useState('');
+  const [wfhEndDate, setWfhEndDate] = useState('');
+  const [wfhEndTime, setWfhEndTime] = useState('');
+
   const openEdit = (emp) => {
     setEditingOriginalUsername(emp.username);
     setEditingEmployee({ username: emp.username, email: emp.email, password: '' });
@@ -254,40 +262,72 @@ function AdminDashboard() {
     }
   }; 
 
-  const handleWFHAction = async (empUsername, action) => {
+  const handleWFHAction = (empUsername, action) => {
+    if (action === 'approved') {
+      setWfhModalEmployee(empUsername);
+      // Set default dates/times
+      const today = new Date();
+      const dateStr = today.toISOString().split('T')[0];
+      const startTimeStr = '09:00';
+      const endTimeStr = '17:00';
+      
+      setWfhStartDate(dateStr);
+      setWfhStartTime(startTimeStr);
+      setWfhEndDate(dateStr);
+      setWfhEndTime(endTimeStr);
+      setWfhModalOpen(true);
+    } else if (action === 'rejected') {
+      handleRejectWFH(empUsername);
+    }
+  };
+
+  const handleRejectWFH = async (empUsername) => {
     try {
-      let payload = { status: action };
-
-      // If approving, prompt admin to allocate access window (start and end)
-      if (action === 'approved') {
-        const startInput = window.prompt('Enter access start (YYYY-MM-DD HH:MM in 24h), e.g. 2025-12-07 09:00');
-        if (!startInput) {
-          toast.error('Approval cancelled: start time required');
-          return;
-        }
-        const endInput = window.prompt('Enter access end (YYYY-MM-DD HH:MM in 24h), e.g. 2025-12-07 17:00');
-        if (!endInput) {
-          toast.error('Approval cancelled: end time required');
-          return;
-        }
-
-        // Parse into ISO strings
-        const startIso = new Date(startInput.replace(' ', 'T')).toISOString();
-        const endIso = new Date(endInput.replace(' ', 'T')).toISOString();
-
-        payload.access_start = startIso;
-        payload.access_end = endIso;
-      }
-
       await axios.put(
         `${API}/admin/wfh-requests/${empUsername}`,
-        payload,
+        { status: 'rejected' },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      toast.success(`Request ${action}`);
+      toast.success('Request rejected');
       loadData();
     } catch (error) {
       toast.error('Failed to process request');
+    }
+  };
+
+  const handleApproveWFH = async (e) => {
+    e.preventDefault();
+    
+    if (!wfhStartDate || !wfhStartTime || !wfhEndDate || !wfhEndTime) {
+      toast.error('Please fill in all date and time fields');
+      return;
+    }
+
+    try {
+      // Combine date and time into ISO strings
+      const startIso = new Date(`${wfhStartDate}T${wfhStartTime}`).toISOString();
+      const endIso = new Date(`${wfhEndDate}T${wfhEndTime}`).toISOString();
+
+      // Validate that end is after start
+      if (new Date(endIso) <= new Date(startIso)) {
+        toast.error('End time must be after start time');
+        return;
+      }
+
+      await axios.put(
+        `${API}/admin/wfh-requests/${wfhModalEmployee}`,
+        { 
+          status: 'approved',
+          access_start: startIso,
+          access_end: endIso
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      toast.success('WFH request approved');
+      setWfhModalOpen(false);
+      loadData();
+    } catch (error) {
+      toast.error('Failed to approve request');
     }
   };
 
@@ -1331,6 +1371,229 @@ function AdminDashboard() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* WFH Approval Modal */}
+      {wfhModalOpen && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '12px',
+            padding: '32px',
+            maxWidth: '500px',
+            width: '90%',
+            boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)'
+          }}>
+            <h2 style={{
+              fontSize: '24px',
+              fontWeight: '700',
+              marginBottom: '8px',
+              color: '#1f2937'
+            }}>
+              Approve WFH Request
+            </h2>
+            <p style={{
+              color: '#6b7280',
+              marginBottom: '24px',
+              fontSize: '14px'
+            }}>
+              Set the access window for {wfhModalEmployee}'s work from home period
+            </p>
+
+            <form onSubmit={handleApproveWFH}>
+              <div style={{ display: 'grid', gap: '20px' }}>
+                {/* Start Date/Time */}
+                <div>
+                  <label style={{
+                    display: 'block',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    marginBottom: '8px',
+                    color: '#1f2937'
+                  }}>
+                    Start Date & Time
+                  </label>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: '12px'
+                  }}>
+                    <input
+                      type="date"
+                      value={wfhStartDate}
+                      onChange={(e) => setWfhStartDate(e.target.value)}
+                      style={{
+                        padding: '10px 12px',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '6px',
+                        fontSize: '14px',
+                        fontFamily: 'inherit'
+                      }}
+                      required
+                    />
+                    <input
+                      type="time"
+                      value={wfhStartTime}
+                      onChange={(e) => setWfhStartTime(e.target.value)}
+                      style={{
+                        padding: '10px 12px',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '6px',
+                        fontSize: '14px',
+                        fontFamily: 'inherit'
+                      }}
+                      required
+                    />
+                  </div>
+                  {wfhStartDate && wfhStartTime && (
+                    <p style={{
+                      fontSize: '12px',
+                      color: '#10b981',
+                      marginTop: '6px',
+                      fontWeight: '500'
+                    }}>
+                      Start: {new Date(`${wfhStartDate}T${wfhStartTime}`).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+
+                {/* End Date/Time */}
+                <div>
+                  <label style={{
+                    display: 'block',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    marginBottom: '8px',
+                    color: '#1f2937'
+                  }}>
+                    End Date & Time
+                  </label>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: '12px'
+                  }}>
+                    <input
+                      type="date"
+                      value={wfhEndDate}
+                      onChange={(e) => setWfhEndDate(e.target.value)}
+                      style={{
+                        padding: '10px 12px',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '6px',
+                        fontSize: '14px',
+                        fontFamily: 'inherit'
+                      }}
+                      required
+                    />
+                    <input
+                      type="time"
+                      value={wfhEndTime}
+                      onChange={(e) => setWfhEndTime(e.target.value)}
+                      style={{
+                        padding: '10px 12px',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '6px',
+                        fontSize: '14px',
+                        fontFamily: 'inherit'
+                      }}
+                      required
+                    />
+                  </div>
+                  {wfhEndDate && wfhEndTime && (
+                    <p style={{
+                      fontSize: '12px',
+                      color: '#10b981',
+                      marginTop: '6px',
+                      fontWeight: '500'
+                    }}>
+                      End: {new Date(`${wfhEndDate}T${wfhEndTime}`).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+
+                {/* Duration Summary */}
+                {wfhStartDate && wfhStartTime && wfhEndDate && wfhEndTime && (
+                  <div style={{
+                    padding: '12px',
+                    backgroundColor: '#f0fdf4',
+                    borderRadius: '8px',
+                    borderLeft: '4px solid #10b981'
+                  }}>
+                    <p style={{
+                      margin: 0,
+                      fontSize: '13px',
+                      color: '#065f46',
+                      fontWeight: '500'
+                    }}>
+                      ✓ Duration: {(() => {
+                        const start = new Date(`${wfhStartDate}T${wfhStartTime}`);
+                        const end = new Date(`${wfhEndDate}T${wfhEndTime}`);
+                        const diffMs = end - start;
+                        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+                        const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                        return `${diffHours}h ${diffMins}m`;
+                      })()}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{
+                display: 'flex',
+                gap: '12px',
+                marginTop: '24px',
+                justifyContent: 'flex-end'
+              }}>
+                <button
+                  type="button"
+                  onClick={() => setWfhModalOpen(false)}
+                  style={{
+                    padding: '10px 20px',
+                    backgroundColor: '#f3f4f6',
+                    color: '#374151',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  style={{
+                    padding: '10px 24px',
+                    backgroundColor: '#10b981',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  Approve & Set Window
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
