@@ -4,6 +4,7 @@ import axios from 'axios';
 import { toast } from 'sonner';
 import { FileText, Users, Activity, AlertTriangle, Settings, LogOut, Upload, Brain, TrendingUp, Shield } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import FileService from '@/utils/fileService';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -29,6 +30,9 @@ function AdminDashboard() {
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('username');
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  
+  // Initialize FileService
+  const fileService = new FileService(token);
 
   // File viewer state
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -135,27 +139,21 @@ function AdminDashboard() {
 
   const handleFileView = async (file) => {
     try {
-      const response = await axios.post(
-        `${API}/files/access`,
-        { file_id: file.file_id },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          responseType: 'blob'
-        }
-      );
+      const result = await fileService.accessFile(file.file_id);
 
-      // Handle different file types
-      const fileName = file.filename.toLowerCase();
-      const isTextFile = fileName.endsWith('.txt') || fileName.endsWith('.md') || fileName.endsWith('.log') || fileName.endsWith('.json') || fileName.endsWith('.csv');
-      const isImageFile = /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(fileName);
-      const isPdfFile = fileName.endsWith('.pdf');
+      if (!result.success) {
+        toast.error(result.error || 'Access denied');
+        return;
+      }
+
+      const fileType = fileService.getFileType(file.filename);
       
       setViewerFile(file);
-      setViewerBlob(response.data);
+      setViewerBlob(result.data);
       
       // Only convert to text for text files
-      if (isTextFile) {
-        const text = await response.data.text();
+      if (fileType.isText) {
+        const text = await fileService.blobToText(result.data);
         setViewerContent(text);
       } else {
         setViewerContent('');
@@ -169,26 +167,7 @@ function AdminDashboard() {
 
       // No success toast for admin
     } catch (error) {
-      let detail = error.response?.data?.detail;
-      if (!detail && error.response && error.response.data instanceof Blob) {
-        try {
-          const text = await error.response.data.text();
-          const parsed = JSON.parse(text);
-          detail = parsed?.detail || text;
-        } catch (err) {
-          detail = null;
-        }
-      }
-
-      let errorMsg = 'Access denied';
-      if (Array.isArray(detail)) {
-        errorMsg = detail.map(d => d.msg || JSON.stringify(d)).join('; ');
-      } else if (typeof detail === 'string') {
-        errorMsg = detail;
-      } else if (detail && typeof detail === 'object') {
-        errorMsg = detail.reason || JSON.stringify(detail);
-      }
-      toast.error(errorMsg);
+      toast.error('Failed to view file');
     }
   };
 
@@ -333,21 +312,24 @@ function AdminDashboard() {
 
   const handleFileUpload = async (e) => {
     e.preventDefault();
-    if (!selectedFile) {
-      toast.error('Please select a file');
+    
+    // Validate file
+    const validation = fileService.validateFileForUpload(selectedFile);
+    if (!validation.valid) {
+      toast.error(validation.error);
       return;
     }
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
-
     try {
-      await axios.post(`${API}/files/upload`, formData, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      toast.success('File uploaded and encrypted');
-      setSelectedFile(null);
-      loadData();
+      const result = await fileService.uploadFile(selectedFile);
+      
+      if (result.success) {
+        toast.success(result.message);
+        setSelectedFile(null);
+        loadData();
+      } else {
+        toast.error(result.message);
+      }
     } catch (error) {
       toast.error('Failed to upload file');
     }

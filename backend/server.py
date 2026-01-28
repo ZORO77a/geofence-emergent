@@ -29,6 +29,7 @@ from crypto_service import CryptoService
 from geofence import GeofenceValidator
 from ml_service import AnomalyDetector
 from wifi_service import WiFiService
+from file_service import FileService, FilePermissionValidator
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -43,6 +44,8 @@ fs = None
 crypto_service = CryptoService()
 geofence_validator = GeofenceValidator()
 anomaly_detector = AnomalyDetector()
+file_service = None
+file_permission_validator = None
 
 # Rate limiting storage
 login_attempts = defaultdict(list)
@@ -186,11 +189,16 @@ async def init_admin():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    global client, db, fs
+    global client, db, fs, file_service, file_permission_validator
     logger.info("Starting up application...")
     client = AsyncIOMotorClient(mongo_url)
     db = client[os.environ['DB_NAME']]
     fs = motor.motor_asyncio.AsyncIOMotorGridFSBucket(db)
+    
+    # Initialize file service
+    file_service = FileService(fs, db, crypto_service)
+    file_permission_validator = FilePermissionValidator(db)
+    
     await init_admin()
     logger.info("Application startup complete")
     
@@ -915,52 +923,17 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
     if current_user["role"] != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    # Measure end-to-end timings: read, encrypt, store
-    start_total = time.perf_counter()
-
-    # Read file content
-    start = time.perf_counter()
-    file_content = await file.read()
-    read_time = time.perf_counter() - start
-    
-    # Encrypt file
-    start = time.perf_counter()
-    encryption_key = crypto_service.generate_key()
-    encrypted_content = crypto_service.encrypt_file(file_content, encryption_key)
-    encrypt_time = time.perf_counter() - start
-    
-    # Store in GridFS
-    start = time.perf_counter()
-    file_id = await fs.upload_from_stream(
-        file.filename,
-        encrypted_content
-    )
-    store_time = time.perf_counter() - start
-    
-    total_time = time.perf_counter() - start_total
-    
-    # Store metadata (include timings for observability)
-    metadata = {
-        "file_id": str(file_id),
-        "filename": file.filename,
-        "uploaded_by": current_user["username"],
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        "encrypted": True,
-        "size": len(file_content),
-        "encryption_key": crypto_service.key_to_string(encryption_key),
-        "timings_ms": {
-            "read_ms": round(read_time * 1000, 3),
-            "encrypt_ms": round(encrypt_time * 1000, 3),
-            "store_ms": round(store_time * 1000, 3),
-            "total_ms": round(total_time * 1000, 3)
-        }
-    }
-    
-    await db.file_metadata.insert_one(metadata)
-
-    logger.info(f"File upload timings for {metadata['file_id']}: {metadata['timings_ms']}")
-    
-    return {"message": "File uploaded and encrypted", "file_id": str(file_id), "timings_ms": metadata["timings_ms"]}
+    try:
+        file_content = await file.read()
+        result = await file_service.upload_file(
+            file_content=file_content,
+            filename=file.filename,
+            uploaded_by=current_user["username"]
+        )
+        return result
+    except Exception as e:
+        logger.error(f"File upload error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @api_router.get("/files")
 async def list_files(latitude: Optional[float] = None, longitude: Optional[float] = None, wifi_ssid: Optional[str] = None, current_user: dict = Depends(get_current_user)):
@@ -968,12 +941,8 @@ async def list_files(latitude: Optional[float] = None, longitude: Optional[float
     List files. Employees will only see files uploaded by admin.
     Optional query params latitude/longitude/wifi_ssid will be used to compute per-file accessibility flag.
     """
-    query = {}
-    # Employees should only see admin uploaded files
-    if current_user["role"] == UserRole.EMPLOYEE:
-        query = {"uploaded_by": "admin"}
-
-    files_cursor = await db.file_metadata.find(query, {"_id": 0, "encryption_key": 0}).to_list(1000)
+    uploaded_by = "admin" if current_user["role"] == UserRole.EMPLOYEE else None
+    files_cursor = await file_service.list_files(uploaded_by=uploaded_by)
 
     # Evaluate accessibility for each file for this employee if coordinates/wifi are provided
     config = await db.geofence_config.find_one({}, {"_id": 0})
@@ -1038,44 +1007,19 @@ async def list_files(latitude: Optional[float] = None, longitude: Optional[float
 async def access_file(request: AccessRequest, current_user: dict = Depends(get_current_user)):
     try:
         logger.info(f"File access attempt: user={current_user['username']}, file_id={request.file_id}, lat={request.latitude}, lon={request.longitude}, wifi={request.wifi_ssid}")
+        
         if current_user["role"] != UserRole.EMPLOYEE:
             # Admin has unrestricted access
-            file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
-            if not file_meta:
-                raise HTTPException(status_code=404, detail="File not found")
-            
-            # Get encrypted file
-            from bson import ObjectId
-            grid_out = await fs.open_download_stream(ObjectId(file_meta["file_id"]))
-            encrypted_content = await grid_out.read()
-            
-            # Decrypt
-            key = crypto_service.string_to_key(file_meta["encryption_key"])
-            decrypted_content = crypto_service.decrypt_file(encrypted_content, key)
-            
-            # Determine media type based on file extension
-            filename = file_meta['filename'].lower()
-            if filename.endswith('.pdf'):
-                media_type = "application/pdf"
-            elif filename.endswith(('.jpg', '.jpeg')):
-                media_type = "image/jpeg"
-            elif filename.endswith('.png'):
-                media_type = "image/png"
-            elif filename.endswith('.gif'):
-                media_type = "image/gif"
-            elif filename.endswith(('.txt', '.log')):
-                media_type = "text/plain"
-            elif filename.endswith('.json'):
-                media_type = "application/json"
-            else:
-                media_type = "application/octet-stream"
-            
-            # Use inline to allow viewing in browser, not downloading
-            return StreamingResponse(
-                io.BytesIO(decrypted_content),
-                media_type=media_type,
-                headers={"Content-Disposition": f"inline; filename={file_meta['filename']}"}
-            )
+            try:
+                file_data = await file_service.access_file(request.file_id)
+                
+                return StreamingResponse(
+                    io.BytesIO(file_data["content"]),
+                    media_type=file_data["media_type"],
+                    headers={"Content-Disposition": f"inline; filename={file_data['filename']}"}
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e))
         
         # Employee access - check conditions
         # Check if WFH approved and whether access window allows bypass
@@ -1091,6 +1035,7 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
         now = datetime.now(timezone.utc)
         # Default validation result - not allowed until checks run
         validation_result = {"allowed": False, "reason": "Access denied"}
+        wfh_id = None
 
         if wfh_request:
             # If admin approved, require an allocated access window
@@ -1098,20 +1043,17 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
             access_end = _parse_iso_to_utc(wfh_request.get("access_end"))
 
             if access_start and access_end:
-                if access_start and access_end:
-                    if access_start <= now <= access_end:
-                        # WFH approved and within admin-allocated window: bypass wifi/location checks
-                        validation_result = {"allowed": True, "reason": "WFH approved - time window active"}
-                        # Add WFH audit id
-                        wfh_id = str(wfh_request.get("_id"))
-                        log_extra = {"wfh_request_id": wfh_id}
-                    else:
-                        # WFH exists but not active. Fall back to normal geofence validation rather than blocking.
-                        validation_result = geofence_validator.validate_access(
-                            request.model_dump(),
-                            config,
-                            False
-                        )
+                if access_start <= now <= access_end:
+                    # WFH approved and within admin-allocated window: bypass wifi/location checks
+                    validation_result = {"allowed": True, "reason": "WFH approved - time window active"}
+                    wfh_id = str(wfh_request.get("_id"))
+                else:
+                    # WFH exists but not active. Fall back to normal geofence validation rather than blocking.
+                    validation_result = geofence_validator.validate_access(
+                        request.model_dump(),
+                        config,
+                        False
+                    )
             else:
                 # Admin approved WFH but no window allocated, fall back to normal validation
                 validation_result = geofence_validator.validate_access(
@@ -1128,72 +1070,44 @@ async def access_file(request: AccessRequest, current_user: dict = Depends(get_c
             )
         logger.info(f"Validation result for file {request.file_id}: {validation_result}")
         
+        # Get file metadata for logging
+        file_meta = await file_service.get_file_metadata(request.file_id)
+        filename = file_meta.get("filename", "") if file_meta else ""
+        
         # Log access attempt
-        log = {
-            "employee_username": current_user["username"],
-            "file_id": request.file_id,
-            "filename": "",
-            "action": "access",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "location": {"lat": request.latitude, "lon": request.longitude},
-            "wifi_ssid": request.wifi_ssid,
-            "success": validation_result["allowed"],
-            "reason": validation_result["reason"]
-        }
-
-        # Include WFH request id if bypass was used
-        if wfh_request and validation_result.get('allowed') and validation_result.get('reason','').startswith('WFH approved'):
-            log['wfh_request_id'] = str(wfh_request.get('_id'))
-        
-        file_meta = await db.file_metadata.find_one({"file_id": request.file_id}, {"_id": 0})
-        if file_meta:
-            log["filename"] = file_meta["filename"]
-        
-        await db.access_logs.insert_one(log)
+        await file_service.log_file_access(
+            employee_username=current_user["username"],
+            file_id=request.file_id,
+            filename=filename,
+            action="access",
+            success=validation_result["allowed"],
+            reason=validation_result["reason"],
+            location={"lat": request.latitude, "lon": request.longitude},
+            wifi_ssid=request.wifi_ssid,
+            wfh_request_id=wfh_id
+        )
         
         if not validation_result["allowed"]:
             # Return structured validation result for better frontend debugging
             raise HTTPException(status_code=403, detail=validation_result)
         
-        # Access granted - decrypt and return file
-        if not file_meta:
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        from bson import ObjectId
-        grid_out = await fs.open_download_stream(ObjectId(file_meta["file_id"]))
-        encrypted_content = await grid_out.read()
-        
-        key = crypto_service.string_to_key(file_meta["encryption_key"])
-        decrypted_content = crypto_service.decrypt_file(encrypted_content, key)
-        
-        # Determine media type based on file extension
-        filename = file_meta['filename'].lower()
-        if filename.endswith('.pdf'):
-            media_type = "application/pdf"
-        elif filename.endswith(('.jpg', '.jpeg')):
-            media_type = "image/jpeg"
-        elif filename.endswith('.png'):
-            media_type = "image/png"
-        elif filename.endswith('.gif'):
-            media_type = "image/gif"
-        elif filename.endswith(('.txt', '.log')):
-            media_type = "text/plain"
-        elif filename.endswith('.json'):
-            media_type = "application/json"
-        else:
-            media_type = "application/octet-stream"
-        
-        # Use inline to allow viewing in browser, not downloading
-        return StreamingResponse(
-            io.BytesIO(decrypted_content),
-            media_type=media_type,
-            headers={"Content-Disposition": f"inline; filename={file_meta['filename']}"}
-        )
+        # Access granted - get file
+        try:
+            file_data = await file_service.access_file(request.file_id)
+            
+            return StreamingResponse(
+                io.BytesIO(file_data["content"]),
+                media_type=file_data["media_type"],
+                headers={"Content-Disposition": f"inline; filename={file_data['filename']}"}
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+            
     except HTTPException:
         # Re-raise HTTP exceptions as-is (with CORS headers)
         raise
     except Exception as e:
-        logging.error(f"Error in file access endpoint: {str(e)}", exc_info=True)
+        logger.error(f"Error in file access endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # WFH Request Routes

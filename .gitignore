@@ -60,14 +60,12 @@ backend/pqc_*.py
 *private*
 private_keys/
 
-# Documentation and report files (SELECTIVE - keep important docs!)
-# Only exclude specific sensitive documents, NOT all .md and .txt files
-# Keep: README.md, *.md for documentation
-# Exclude: Report files, analysis files marked as private
+# Documentation and report files
+# Hide all .md and .txt files from the root directory
+*.md
+*.txt
+!README.md
 backend_test_results.json
-CURRENT_VULNERABILITY_ASSESSMENT.md
-REMAINING_VULNERABILITIES.md
-VULNERABILITY_STATUS.txt
 
 # Logs and debug files
 npm-debug.log*

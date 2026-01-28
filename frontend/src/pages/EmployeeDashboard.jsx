@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { FileText, MapPin, Wifi, Clock, LogOut, Download, Eye, X } from 'lucide-react';
+import FileService from '@/utils/fileService';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -39,6 +40,9 @@ function EmployeeDashboard() {
 
   const token = localStorage.getItem('token');
   const username = localStorage.getItem('username');
+  
+  // Initialize FileService
+  const fileService = new FileService(token);
 
   // File viewer state
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -272,34 +276,32 @@ function EmployeeDashboard() {
     }
 
     try {
-      const payload = { file_id: file.file_id };
-      if (!wfhActive) {
-        payload.latitude = locToUse.latitude;
-        payload.longitude = locToUse.longitude;
-        payload.wifi_ssid = wifiToUse;
+      const accessOptions = {
+        latitude: wfhActive ? undefined : locToUse.latitude,
+        longitude: wfhActive ? undefined : locToUse.longitude,
+        wifi_ssid: wfhActive ? undefined : wifiToUse
+      };
+
+      const result = await fileService.accessFile(file.file_id, accessOptions);
+
+      if (!result.success) {
+        // Parse error details
+        let errorMsg = result.error || 'Access denied';
+        if (result.validations && typeof result.validations === 'object') {
+          errorMsg = result.error;
+        }
+        toast.error(errorMsg);
+        return;
       }
 
-      const response = await axios.post(
-        `${API}/files/access`,
-        payload,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          responseType: 'blob'
-        }
-      );
-
-      // Handle different file types
-      const fileName = file.filename.toLowerCase();
-      const isTextFile = fileName.endsWith('.txt') || fileName.endsWith('.md') || fileName.endsWith('.log') || fileName.endsWith('.json') || fileName.endsWith('.csv');
-      const isImageFile = /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(fileName);
-      const isPdfFile = fileName.endsWith('.pdf');
+      const fileType = fileService.getFileType(file.filename);
       
       setViewerFile(file);
-      setViewerBlob(response.data);
+      setViewerBlob(result.data);
       
       // Only convert to text for text files
-      if (isTextFile) {
-        const text = await response.data.text();
+      if (fileType.isText) {
+        const text = await fileService.blobToText(result.data);
         setViewerContent(text);
       } else {
         setViewerContent('');
@@ -313,26 +315,7 @@ function EmployeeDashboard() {
 
       toast.success('File access granted for 15 minutes');
     } catch (error) {
-      let detail = error.response?.data?.detail;
-      if (!detail && error.response && error.response.data instanceof Blob) {
-        try {
-          const text = await error.response.data.text();
-          const parsed = JSON.parse(text);
-          detail = parsed?.detail || text;
-        } catch (err) {
-          detail = null;
-        }
-      }
-
-      let errorMsg = 'Access denied';
-      if (Array.isArray(detail)) {
-        errorMsg = detail.map(d => d.msg || JSON.stringify(d)).join('; ');
-      } else if (typeof detail === 'string') {
-        errorMsg = detail;
-      } else if (detail && typeof detail === 'object') {
-        errorMsg = detail.reason || JSON.stringify(detail);
-      }
-      toast.error(errorMsg);
+      toast.error('Failed to access file');
     }
   };
 
